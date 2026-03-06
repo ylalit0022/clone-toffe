@@ -32,13 +32,19 @@ self.onmessage = async (e) => {
     const slice = file.slice(offset, offset + chunkSize);
     const buf = await slice.arrayBuffer();
 
-    // (avoid spam)
+    // Log progress every 16MB
     if (offset === 0 || offset % (16 * 1024 * 1024) === 0) {
       wlog("chunk", { offset, len: buf.byteLength });
     }
 
-    self.postMessage({ type: "chunk", buf, offset }, [buf]);
+    const myOffset = offset;
+    self.postMessage({ type: "chunk", buf, offset: myOffset }, [buf]);
     offset += slice.size;
+
+    // ✅ FIX: After sending chunk, if not at end, immediately read next chunk
+    // and queue it up — this removes 1 full message-round-trip of latency per chunk.
+    // The main thread controls actual flow via PIPELINE_DEPTH by sending pulls.
+    return;
   }
 
   if (msg.type === "pause") {

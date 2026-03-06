@@ -13,10 +13,15 @@ const rooms = {}; // roomId -> Set(socketIds)
 io.on("connection", (socket) => {
   console.log("User Connected:", socket.id);
 
-  socket.on("join-room", (roomId) => {
+  // ✅ UPDATED: join-room now accepts {roomId, deviceName}
+  socket.on("join-room", (payload) => {
+    const roomId = typeof payload === "string" ? payload : payload?.roomId;
+    const deviceName = (typeof payload === "object" && payload?.deviceName ? String(payload.deviceName) : "").trim();
+
     if (!roomId) return;
 
-    // leave old room if any
+    socket.deviceName = deviceName || `User-${socket.id.substring(0, 5)}`;
+
     if (socket.roomId && socket.roomId !== roomId) {
       const old = socket.roomId;
       socket.leave(old);
@@ -36,19 +41,34 @@ io.on("connection", (socket) => {
     io.to(roomId).emit("room-status", { room: roomId, users: rooms[roomId].size });
   });
 
+  // ✅ Typing relay (WhatsApp-like)
+  socket.on("typing", ({ roomId, user }) => {
+    const r = roomId || socket.roomId;
+    if (!r) return;
+    socket.to(r).emit("typing", { user: user || socket.deviceName || "User" });
+  });
+
+  socket.on("stop-typing", ({ roomId }) => {
+    const r = roomId || socket.roomId;
+    if (!r) return;
+    socket.to(r).emit("stop-typing");
+  });
+
+  // ✅ UPDATED: message user = deviceName
   socket.on("send-message", (message) => {
     if (!socket.roomId) return;
     io.to(socket.roomId).emit("receive-message", {
-      user: socket.id.substring(0, 5),
+      user: socket.deviceName || socket.id.substring(0, 5),
       text: message,
     });
   });
 
+  // ✅ UPDATED: file offer sends fromName
   socket.on("file-offer", (meta) => {
     if (!socket.roomId) return;
     socket.to(socket.roomId).emit("file-offer", {
       from: socket.id,
-      fromShort: socket.id.substring(0, 5),
+      fromName: socket.deviceName || socket.id.substring(0, 5),
       meta,
     });
   });

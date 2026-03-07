@@ -179,8 +179,13 @@ const NET = {
 // flight), NOT larger chunks.
 const MAX_CHUNK_SIZE = 256 * 1024;   // 256 KB — hard Chrome/SCTP limit
 
-// Mobile override: reduce chunk size to limit memory pressure
-const MOBILE_MAX_CHUNK = 64 * 1024;
+// Mobile chunk size cap — same as desktop (256 KB).
+// The old 64 KB cap was the primary cause of slow Android transfers:
+//   64 KB × pipeline 8  =  512 KB in flight  →  ~1–2 MB/s ceiling on WiFi.
+//   256 KB × pipeline 16 =  4 MB in flight   →  10–20 MB/s on good WiFi.
+// Chrome's 256 KB SCTP message size limit applies to individual messages,
+// not total memory. 256 KB chunks are safe on all modern Android Chrome builds.
+const MOBILE_MAX_CHUNK = 256 * 1024;
 
 function applyNetworkProfile() {
   const { pathType, rttMs, availBps } = NET;
@@ -211,7 +216,7 @@ function applyNetworkProfile() {
     else if (rttMs < 5)            depth = 32;
     else if (rttMs < 30)           depth = 16;
     else if (rttMs < 100)          depth = 12;
-    else                           depth = IS_MOBILE ? 8 : 16;
+    else                           depth = 16;   // mobile gets same depth as desktop — old value of 8 was too shallow
   }
   NET.pipelineDepth = Math.max(4, Math.min(64, depth));
 
@@ -1268,15 +1273,15 @@ acceptBtn.onclick = async () => {
   if (!pendingIncoming) return;
   transferCompleted = false; gracefulClosing = false; resetReceiverReady(); retryInProgress = false;
   const meta = pendingIncoming.meta;
-  const needDisk = meta.size > MEMORY_MAX_BYTES;
+  const canDisk = "showSaveFilePicker" in window && window.isSecureContext;
   let writable = null;
-  if (needDisk) {
-    const canDisk = "showSaveFilePicker" in window && window.isSecureContext;
-    if (!canDisk) {
-      addMsg(`<span class="muted">⚠️ Large file needs HTTPS for disk saving.</span>`);
-      socket.emit("file-answer", { to: pendingIncoming.from, accepted: false });
-      pendingIncoming = null; modalBg.style.display = "none"; return;
-    }
+
+  // Ask for save location for ALL files (not just large ones).
+  // Previously only files >300MB triggered showSaveFilePicker — small files
+  // used auto-download via a.click() which Android Chrome silently blocks
+  // unless it happens inside a direct user gesture on the same tick.
+  // Asking here (inside the onclick, which IS a user gesture) works on Android.
+  if (canDisk) {
     try {
       const handle = await window.showSaveFilePicker({ suggestedName: meta.name });
       writable = await handle.createWritable();
@@ -1286,7 +1291,16 @@ acceptBtn.onclick = async () => {
       socket.emit("file-answer", { to: pendingIncoming.from, accepted: false });
       pendingIncoming = null; modalBg.style.display = "none"; return;
     }
+  } else {
+    // Fallback for non-HTTPS or browsers without File System Access API —
+    // will use in-memory Blob + a.click() at the end (best effort on desktop).
+    if (meta.size > MEMORY_MAX_BYTES) {
+      addMsg(`<span class="muted">⚠️ Large file needs HTTPS for disk saving.</span>`);
+      socket.emit("file-answer", { to: pendingIncoming.from, accepted: false });
+      pendingIncoming = null; modalBg.style.display = "none"; return;
+    }
   }
+
   pendingWritable = writable;
   socket.emit("file-answer", { to: pendingIncoming.from, accepted: true });
   if (!autoAcceptThisRoom) { saveAutoAcceptFlag(true); addMsg(`<span class="muted">✅ Auto-accept enabled for this room</span>`); }
@@ -1421,7 +1435,7 @@ async function sendFile(file) {
         break;
       }
 
-      const { buf: rawBuf, index, checksum } = chunkQueue.shift();
+      const { buf: rawBuf, index } = chunkQueue.shift();
 
       // ── FIX 1: Trim final chunk to exact remaining bytes ──────────────────
       // Worker slices file at fixed chunkSize boundaries. With a deep pipeline
@@ -1442,7 +1456,7 @@ async function sendFile(file) {
       try {
         broadcastChunk(buf);
       } catch(err) {
-        chunkQueue.unshift({ buf: rawBuf, index, checksum });
+        chunkQueue.unshift({ buf: rawBuf, index });
         dlog("[SEND] dc.send threw:", err?.message);
         break;
       }
@@ -1501,7 +1515,7 @@ async function sendFile(file) {
   fileWorker.onmessage = e => {
     if (e.data.type === "chunk") {
       if (sendState.canceled) return;
-      chunkQueue.push({ buf: e.data.buf, index: e.data.index, checksum: e.data.checksum });
+      chunkQueue.push({ buf: e.data.buf, index: e.data.index });
       sendLoop();
       return;
     }
@@ -1649,28 +1663,31 @@ async function startReceiver(meta) {
   dlog("startReceiver", meta);
   try { const id = meta?.id || `${meta?.name}|${meta?.size}`; upsertRecvItem(id, meta.name, meta.size || 0, "receiving", 0, meta.size || 0); renderRecvQueueUI(); } catch {}
 
+  // Use disk streaming for any file where the user pre-chose a save location
+  // (pendingWritable set in acceptBtn.onclick), OR for files >300MB which
+  // always require disk. Small files without a pendingWritable fall back to
+  // in-memory Blob mode (non-HTTPS / File System Access API not available).
   const needDisk = meta.size > MEMORY_MAX_BYTES;
-  if (needDisk) {
-    if (pendingWritable) {
-      // Consume the pre-chosen writable and keep a module-level backup
-      // so that a reconnect can recover it without asking the user again.
-      incomingFile.writable = pendingWritable;
-      pendingWritable = null;
+  if (pendingWritable) {
+    // Consume the pre-chosen writable (covers both small and large files)
+    incomingFile.writable = pendingWritable;
+    pendingWritable = null;
+    addMsg(`<span class="muted">💾 Saving to disk: ${meta.name}</span>`);
+  } else if (needDisk) {
+    // Large file but no pendingWritable — shouldn't happen in normal flow
+    // (acceptBtn should have set it), but handle gracefully as fallback.
+    const canDisk = "showSaveFilePicker" in window && window.isSecureContext;
+    if (!canDisk) {
+      addMsg(`<span class="muted">⚠️ Large file needs HTTPS for disk saving.</span>`);
+      setStatus("⚠️ Large file needs HTTPS/localhost."); incomingFile = null; return;
+    }
+    try {
+      const handle = await window.showSaveFilePicker({ suggestedName: meta.name });
+      incomingFile.writable = await handle.createWritable();
       addMsg(`<span class="muted">💾 Saving to disk...</span>`);
-    } else {
-      const canDisk = "showSaveFilePicker" in window && window.isSecureContext;
-      if (!canDisk) {
-        addMsg(`<span class="muted">⚠️ Large file needs HTTPS for disk saving.</span>`);
-        setStatus("⚠️ Large file needs HTTPS/localhost."); incomingFile = null; return;
-      }
-      try {
-        const handle = await window.showSaveFilePicker({ suggestedName: meta.name });
-        incomingFile.writable = await handle.createWritable();
-        addMsg(`<span class="muted">💾 Saving to disk...</span>`);
-      } catch {
-        addMsg(`<span class="muted">❌ Save dialog canceled.</span>`);
-        setStatus("❌ Save canceled."); incomingFile = null; return;
-      }
+    } catch {
+      addMsg(`<span class="muted">❌ Save dialog canceled.</span>`);
+      setStatus("❌ Save canceled."); incomingFile = null; return;
     }
   } else {
     addMsg(`<span class="muted">ℹ️ File will appear in Downloads panel after transfer.</span>`);

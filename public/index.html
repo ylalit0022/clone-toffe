@@ -12,6 +12,13 @@
     .muted { color:#666; font-size: 13px; }
     progress { width: 100%; height: 18px; }
 
+    /* Share link input — make it easy to tap & copy on mobile */
+    #shareLinkInput { cursor: pointer; }
+    #shareLinkInput:focus { outline: none; box-shadow: 0 0 0 3px rgba(255,77,109,.25) !important; }
+    #shareLinkCard { animation: slideIn .3s ease; }
+    @keyframes slideIn { from { opacity:0; transform: translateY(-6px); } to { opacity:1; transform: none; } }
+
+
     .dot {
       display:inline-block;
       width:10px; height:10px;
@@ -65,7 +72,33 @@
       </div>
     </div>
 
-    <div class="card shadow-sm mb-3" id="chatSection" style="display:none;">
+    <!-- ─── SHARE LINK PANEL (shown after room creation) ─── -->
+    <div class="card shadow-sm mb-3" id="shareLinkCard" style="display:none;">
+      <div class="card-body">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
+          <span style="font-size:22px;">🔗</span>
+          <div>
+            <div style="font-weight:800;font-size:15px;">Share Download Link</div>
+            <div class="muted" style="font-size:12px;">Anyone who opens this link joins your room and can receive files automatically</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <input class="form-control" type="text" id="shareLinkInput" readonly
+            style="font-size:13px;font-family:monospace;background:rgba(255,255,255,.85);" />
+          <button class="btn btn-primary btn-sm" id="copyLinkBtn" style="white-space:nowrap;min-width:80px;">
+            📋 Copy
+          </button>
+        </div>
+        <div id="shareLinkHint" class="muted mt-2" style="font-size:12px;display:none;">
+          ✅ Copied to clipboard!
+        </div>
+        <div class="muted mt-2" style="font-size:11px;opacity:.7;">
+          ⏳ Link is valid while you stay in this room. Select files above to share, then receivers open this link.
+        </div>
+      </div>
+    </div>
+
+
       <div class="card-body">
         <div id="chatBox" class="border rounded p-2 bg-white"></div>
 

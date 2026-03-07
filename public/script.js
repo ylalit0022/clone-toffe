@@ -104,9 +104,9 @@ const IS_MOBILE = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 
 // ─── TURN / ICE CONFIG ────────────────────────────────────────────────────────
 // Set your India TURN credentials here
-const INDIA_TURN_HOST = "";   // e.g. "123.45.67.89"
-const INDIA_TURN_USER = "";
-const INDIA_TURN_PASS = "";
+const INDIA_TURN_HOST = "share.rumnnlg.com";
+const INDIA_TURN_USER = "testuser";
+const INDIA_TURN_PASS = "testpass123";
 
 function buildIceServers() {
   const servers = [
@@ -252,6 +252,23 @@ async function detectAndApplyNetworkProfile(pcRef) {
     NET.turnSlowSamples = [];
     NET.turnSlowReduced = false;
     applyNetworkProfile();
+
+    // ── Detect which TURN server is being used ────────────────────────────
+    if (NET.pathType === "turn") {
+      try {
+        stats.forEach(r => {
+          if (r.type === "local-candidate" && r.candidateType === "relay") {
+            const url = r.url || r.relatedAddress || "";
+            if (url.includes("share.rumnnlg.com") || url.includes("128.199.28.210")) {
+              window._activeTurnServer = "digitalocean";
+            } else {
+              window._activeTurnServer = "metered";
+            }
+          }
+        });
+      } catch {}
+    }
+
     showConnectionTypeBadge(NET.pathType, NET.rttMs);
     addMsg(`<span class="muted">📡 Path: <b>${NET.pathType.toUpperCase()}</b> · RTT ${NET.rttMs.toFixed(0)}ms · Chunk ${(NET.chunkSize/1024).toFixed(0)}KB · Pipeline ${NET.pipelineDepth}</span>`);
   } catch(e) { dlog("[NET] detectProfile error", e); }
@@ -345,10 +362,20 @@ function showConnectionTypeBadge(pathType, rttMs) {
     const connDot = document.getElementById("connDot");
     connDot?.parentElement?.appendChild(badge);
   }
+
+  // Detect which TURN server is actually being used
+  let turnLabel = "TURN";
+  if (pathType === "turn") {
+    // Check which relay candidate was selected via stored turn server info
+    turnLabel = window._activeTurnServer === "digitalocean"
+      ? "🔴 TURN · DigitalOcean 🇮🇳"
+      : "🔴 TURN · Metered 🌍";
+  }
+
   const map = {
     lan:  ["🟢 LAN",  "rgba(0,200,100,.15)", "#006633"],
     wan:  ["🟡 WAN",  "rgba(255,200,0,.15)", "#886600"],
-    turn: ["🔴 TURN", "rgba(255,80,80,.12)", "#aa2200"],
+    turn: [turnLabel,  "rgba(255,80,80,.12)", "#aa2200"],
   };
   const [label, bg, color] = map[pathType] || ["⚪ —", "transparent", "#888"];
   badge.innerText = `${label} ${rttMs > 0 ? `· ${rttMs.toFixed(0)}ms` : ""}`;
@@ -693,6 +720,77 @@ if (deviceNameInput) {
   deviceNameInput.addEventListener("input", () => localStorage.setItem("deviceName", getDeviceName()));
 }
 
+// ─── SHARE LINK ───────────────────────────────────────────────────────────────
+const shareLinkCard  = document.getElementById("shareLinkCard");
+const shareLinkInput = document.getElementById("shareLinkInput");
+const copyLinkBtn    = document.getElementById("copyLinkBtn");
+const shareLinkHint  = document.getElementById("shareLinkHint");
+
+function generateShareLink(roomId) {
+  const base = window.location.origin + window.location.pathname;
+  return `${base}?room=${encodeURIComponent(roomId)}&mode=download`;
+}
+
+function showShareLink(roomId) {
+  if (!shareLinkCard || !shareLinkInput) return;
+  shareLinkInput.value = generateShareLink(roomId);
+  shareLinkCard.style.display = "block";
+}
+
+function hideShareLink() {
+  if (shareLinkCard) shareLinkCard.style.display = "none";
+}
+
+if (copyLinkBtn) {
+  copyLinkBtn.onclick = async () => {
+    const link = shareLinkInput?.value;
+    if (!link) return;
+    try {
+      await navigator.clipboard.writeText(link);
+    } catch {
+      // Fallback for non-HTTPS or older Android
+      shareLinkInput.select();
+      document.execCommand("copy");
+    }
+    copyLinkBtn.textContent = "✅ Copied!";
+    if (shareLinkHint) { shareLinkHint.style.display = "block"; }
+    setTimeout(() => {
+      copyLinkBtn.textContent = "📋 Copy";
+      if (shareLinkHint) shareLinkHint.style.display = "none";
+    }, 2500);
+  };
+}
+
+// ─── AUTO-JOIN VIA URL PARAMS ─────────────────────────────────────────────────
+// When a receiver opens ?room=XYZ&mode=download, auto-fill room and join,
+// with auto-accept enabled so files arrive immediately without manual accept.
+(function autoJoinFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  const roomParam = params.get("room");
+  const modeParam = params.get("mode");
+  if (!roomParam) return;
+
+  // Wait for DOM + socket to be ready
+  setTimeout(() => {
+    if (roomInput) roomInput.value = roomParam;
+
+    if (modeParam === "download") {
+      // Auto-accept: receiver joined via share link — skip manual accept popup
+      autoAcceptThisRoom = true;
+      try { sessionStorage.setItem(`autoAccept:${roomParam}`, "1"); } catch {}
+      addMsg(`<span class="muted">🔗 Joined via share link — auto-accept enabled. Waiting for sender to share files...</span>`);
+    }
+
+    joinRoom(roomParam, "join");
+
+    // Clean the URL so refreshing doesn't re-trigger (cosmetic)
+    try {
+      const clean = window.location.pathname;
+      window.history.replaceState({}, "", clean);
+    } catch {}
+  }, 300);
+})();
+
 // ─── ROOM ─────────────────────────────────────────────────────────────────────
 function joinRoom(roomId, mode) {
   currentRoom = roomId;
@@ -702,9 +800,11 @@ function joinRoom(roomId, mode) {
   if (mode === "create") {
     setConnectedUI(false, "Room created", `Room: ${roomId} — Waiting...`);
     addMsg(`<span class="muted">🆕 Room: <b>${roomId}</b> (waiting...)</span>`);
+    showShareLink(roomId);   // ← show share link for sender
   } else {
     setConnectedUI(false, "Joining...", `Room: ${roomId}`);
     addMsg(`<span class="muted">➡️ Joined: <b>${roomId}</b></span>`);
+    hideShareLink();
   }
 }
 createBtn.onclick = () => { const id = Math.random().toString(36).slice(2, 8).toUpperCase(); roomInput.value = id; joinRoom(id, "create"); };

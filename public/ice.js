@@ -2,10 +2,10 @@
 //  ice.js  — ICE / TURN server configuration
 // ═══════════════════════════════════════════════
 
-// ── Set your India TURN credentials here ────────
-const INDIA_TURN_HOST = "";   // e.g. "123.45.67.89"
-const INDIA_TURN_USER = "";
-const INDIA_TURN_PASS = "";
+// ── India TURN server credentials ────────────────
+const INDIA_TURN_HOST = "share.rumnnlg.com";
+const INDIA_TURN_USER = "testuser";
+const INDIA_TURN_PASS = "testpass123";
 
 export function buildIceServers() {
   const servers = [
@@ -61,6 +61,16 @@ export function detectPathType(stats) {
   if (lt === "host" && rt === "host")        pathType = "lan";
   else if (lt === "relay" || rt === "relay") pathType = "turn";
   else                                        pathType = "wan";
+
+  // ── Detect which TURN server is being used ──────────────────────────────
+  if (pathType === "turn") {
+    const relayUrl = local?.url || remote?.url || "";
+    if (relayUrl.includes("share.rumnnlg.com") || relayUrl.includes("128.199.28.210")) {
+      window._activeTurnServer = "digitalocean";
+    } else {
+      window._activeTurnServer = "metered";
+    }
+  }
 
   return {
     pathType,

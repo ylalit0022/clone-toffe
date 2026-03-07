@@ -1,422 +1,988 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>WebRTC P2P File Transfer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tranzo -- Send Files Directly, Peer-to-Peer</title>
+  <meta name="description" content="Transfer files directly between devices for free using WebRTC. No cloud, no signup, no limits. 100% private P2P file sharing." />
 
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"/>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@600;700&family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&display=swap" rel="stylesheet"/>
 
   <style>
-    #chatBox { height: 220px; overflow-y: auto; }
-    .msg { margin-bottom: 8px; }
-    .muted { color:#666; font-size: 13px; }
-    progress { width: 100%; height: 18px; }
+    /* ================================================
+       TRANZO  --  WHITE + EMERALD + AMBER
+    ================================================ */
+    :root {
+      --bg:        #FFFFFF;
+      --surface:   #F8FAFB;
+      --surfaceHi: #EEF2F5;
 
-    /* Share link input — make it easy to tap & copy on mobile */
-    #shareLinkInput { cursor: pointer; }
-    #shareLinkInput:focus { outline: none; box-shadow: 0 0 0 3px rgba(255,77,109,.25) !important; }
-    #shareLinkCard { animation: slideIn .3s ease; }
-    @keyframes slideIn { from { opacity:0; transform: translateY(-6px); } to { opacity:1; transform: none; } }
+      --border:    rgba(17,24,39,.1);
+      --borderHi:  rgba(17,24,39,.2);
+      --borderEm:  rgba(5,150,105,.3);
+      --borderAmb: rgba(217,119,6,.3);
 
+      --text:   #111827;
+      --muted:  #4B5563;
+      --muted2: #9CA3AF;
 
-    .dot {
-      display:inline-block;
-      width:10px; height:10px;
-      border-radius:50%;
-      background:#dc3545;
-      margin-right:6px;
-      vertical-align:middle;
+      --em:      #059669;
+      --emDark:  #047857;
+      --emLight: #D1FAE5;
+      --emGlow:  rgba(5,150,105,.18);
+
+      --amb:      #D97706;
+      --ambDark:  #B45309;
+      --ambLight: #FEF3C7;
+      --ambGlow:  rgba(217,119,6,.15);
+
+      --rose:      #EF4444;
+      --roseLight: #FEE2E2;
+
+      --success: #059669;
+
+      --r:   14px;
+      --rSm: 9px;
+      --rXs: 6px;
+
+      --shadow-sm: 0 1px 3px rgba(0,0,0,.07), 0 1px 2px rgba(0,0,0,.04);
+      --shadow-md: 0 4px 16px rgba(0,0,0,.08), 0 2px 6px rgba(0,0,0,.04);
+      --shadow-lg: 0 12px 40px rgba(0,0,0,.1),  0 4px 12px rgba(0,0,0,.06);
     }
-    .dot.green { background:#198754; }
 
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      font-size: 15px;
+      line-height: 1.6;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    /* Subtle background decoration */
+    .bg-canvas {
+      position: fixed; inset: 0; z-index: 0; pointer-events: none;
+    }
+    .bg-canvas::before {
+      content: "";
+      position: absolute; inset: 0;
+      background:
+        radial-gradient(ellipse 900px 600px at 10%  0%,  rgba(5,150,105,.05), transparent 60%),
+        radial-gradient(ellipse 700px 500px at 90% 100%, rgba(217,119,6,.04),  transparent 55%),
+        radial-gradient(ellipse 600px 400px at 50%  50%, rgba(5,150,105,.03),  transparent 65%);
+      animation: bgDrift 24s ease-in-out infinite alternate;
+    }
+    @keyframes bgDrift {
+      0%   { transform: scale(1)    translate(0,0); }
+      50%  { transform: scale(1.03) translate(-8px, 6px); }
+      100% { transform: scale(1.02) translate(8px,-5px); }
+    }
+    .bg-canvas::after {
+      content: "";
+      position: absolute; inset: 0;
+      background-image: radial-gradient(circle, rgba(17,24,39,.055) 1px, transparent 1px);
+      background-size: 28px 28px;
+    }
+
+    .page-wrap {
+      position: relative; z-index: 1;
+      min-height: 100vh;
+      display: flex; flex-direction: column;
+    }
+
+    /* ================================================
+       NAVBAR  —  Bootstrap navbar pattern
+    ================================================ */
+    .nav-bar {
+      background: rgba(255,255,255,.92);
+      backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+      border-bottom: 1px solid var(--border);
+      position: sticky; top: 0; z-index: 200;
+      padding: 0;
+    }
+
+    .nav-inner {
+      height: 62px;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+
+    .nav-logo {
+      font-family: 'Bricolage Grotesque', sans-serif;
+      font-weight: 800; font-size: 1.25rem; letter-spacing: -.03em;
+      text-decoration: none; color: var(--text);
+      display: flex; align-items: center; gap: 10px;
+    }
+    .nav-logo-icon {
+      width: 32px; height: 32px; border-radius: 9px; flex-shrink: 0;
+      background: linear-gradient(135deg, var(--em), var(--emDark));
+      display: flex; align-items: center; justify-content: center;
+      font-size: 15px;
+      box-shadow: 0 2px 10px var(--emGlow);
+    }
+    .nav-logo .dot { color: var(--em); }
+
+    .nav-right { display: flex; align-items: center; gap: 10px; }
+
+    /* Badge: min 12px, darkened for contrast on light bg */
+    .nav-badge {
+      font-family: 'Space Grotesk', sans-serif;
+      font-size: 12px; font-weight: 700; letter-spacing: .6px;
+      text-transform: uppercase; padding: 3px 10px; border-radius: 999px;
+      background: var(--emLight); color: var(--emDark);
+      border: 1px solid rgba(5,150,105,.3);
+    }
+
+    .conn-pill {
+      display: flex; align-items: center; gap: 7px;
+      background: var(--surface);
+      border: 1px solid var(--border); border-radius: 999px;
+      padding: 5px 12px 5px 9px;
+      box-shadow: var(--shadow-sm);
+    }
+    .conn-dot {
+      width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+      background: var(--rose);
+      box-shadow: 0 0 0 2px rgba(239,68,68,.18);
+      transition: all .4s;
+    }
+    .conn-dot.green {
+      background: var(--em);
+      box-shadow: 0 0 0 2px rgba(5,150,105,.2), 0 0 6px var(--emGlow);
+      animation: dotPulse 2.5s infinite;
+    }
+    @keyframes dotPulse {
+      0%,100% { box-shadow: 0 0 0 2px rgba(5,150,105,.2), 0 0 6px var(--emGlow); }
+      50%      { box-shadow: 0 0 0 4px rgba(5,150,105,.1), 0 0 12px var(--emGlow); }
+    }
+    #status { font-size: 13px; color: var(--muted); font-weight: 600; white-space: nowrap; }
+
+    /* ================================================
+       HERO  --  collapses after Create / Join
+    ================================================ */
+    .hero {
+      text-align: center;
+      padding: 72px 0 52px;
+      transition: padding .5s cubic-bezier(.4,0,.2,1);
+    }
+    .hero.hero-compact { padding: 28px 0 20px; }
+
+    /* All hero children collapse via max-height — stay in DOM for SEO */
+    .hero-eyebrow {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-family: 'Space Grotesk', sans-serif;
+      font-size: 13px; font-weight: 700; letter-spacing: .5px;
+      text-transform: uppercase; color: var(--ambDark);
+      border: 1px solid var(--borderAmb); padding: 6px 16px;
+      border-radius: 999px; margin-bottom: 20px;
+      background: var(--ambLight);
+      overflow: hidden; max-height: 56px; opacity: 1;
+      transition: max-height .45s ease, opacity .3s ease, margin .4s ease;
+    }
+    .hero.hero-compact .hero-eyebrow { max-height: 0; opacity: 0; margin-bottom: 0; }
+
+    .hero h1 {
+      font-family: 'Bricolage Grotesque', sans-serif;
+      font-weight: 800;
+      font-size: clamp(1.9rem, 5vw, 3.4rem);
+      line-height: 1.08; letter-spacing: -.03em;
+      color: var(--text); margin-bottom: 16px;
+      transition: font-size .45s ease, margin .4s ease;
+    }
+    .hero.hero-compact h1 {
+      font-size: clamp(1.15rem, 3vw, 1.5rem);
+      margin-bottom: 0;
+    }
+    .hero h1 .grad {
+      background: linear-gradient(100deg, var(--em) 0%, #10B981 45%, var(--amb) 100%);
+      -webkit-background-clip: text; background-clip: text; color: transparent;
+    }
+
+    .hero-sub {
+      font-size: 1rem; color: var(--muted);
+      max-width: 440px; margin: 0 auto 28px; line-height: 1.75;
+      overflow: hidden; max-height: 100px; opacity: 1;
+      transition: max-height .45s ease, opacity .3s ease, margin .4s ease;
+    }
+    .hero.hero-compact .hero-sub { max-height: 0; opacity: 0; margin-bottom: 0; }
+
+    .trust-badges {
+      display: flex; flex-wrap: wrap; justify-content: center; gap: 8px;
+      overflow: hidden; max-height: 80px; opacity: 1;
+      transition: max-height .4s ease, opacity .3s ease;
+    }
+    .hero.hero-compact .trust-badges { max-height: 0; opacity: 0; }
+
+    .trust-badge {
+      display: inline-flex; align-items: center; gap: 5px;
+      font-size: 13px; font-weight: 600; color: var(--muted);
+      background: var(--surface); border: 1px solid var(--border);
+      padding: 6px 14px; border-radius: 999px;
+      box-shadow: var(--shadow-sm);
+      transition: border-color .2s, color .2s;
+    }
+    .trust-badge:hover { border-color: var(--borderEm); color: var(--em); }
+
+    /* ================================================
+       CARD
+    ================================================ */
+    .g-card {
+      background: #fff;
+      border: 1px solid var(--border);
+      border-radius: var(--r);
+      margin-bottom: 16px;
+      overflow: hidden; position: relative;
+      transition: border-color .25s, box-shadow .25s;
+      box-shadow: var(--shadow-sm);
+    }
+    .g-card:hover { border-color: var(--borderHi); box-shadow: var(--shadow-md); }
+    .g-card.strip-em  { border-top: 2px solid var(--em); }
+    .g-card.strip-amb { border-top: 2px solid var(--amb); }
+    .g-card-body { padding: 22px 24px; }
+
+    /* ================================================
+       PROGRESSIVE REVEAL
+       Elements in DOM always (SEO safe, no layout shift).
+    ================================================ */
+    .reveal-panel {
+      overflow: hidden;
+      max-height: 0; opacity: 0; transform: translateY(-6px);
+      pointer-events: none;
+      transition:
+        max-height .55s cubic-bezier(.4,0,.2,1),
+        opacity    .4s  cubic-bezier(.4,0,.2,1),
+        transform  .45s cubic-bezier(.4,0,.2,1);
+    }
+    .reveal-panel.is-visible {
+      max-height: 1600px; opacity: 1; transform: translateY(0);
+      pointer-events: auto;
+    }
+    #shareLinkPanel { transition-delay: 0s,   0s,   0s;   }
+    #chatPanel      { transition-delay: .08s, .08s, .08s; }
+    #filePanel      { transition-delay: .16s, .16s, .16s; }
+
+    /* ================================================
+       SECTION LABEL
+    ================================================ */
+    .section-label {
+      font-family: 'Space Grotesk', sans-serif;
+      font-size: 12px; font-weight: 700; letter-spacing: 1px;
+      text-transform: uppercase; color: #6B7280;
+      margin-bottom: 16px;
+      display: flex; align-items: center; gap: 10px;
+    }
+    .section-label::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+
+    /* ================================================
+       INPUTS
+    ================================================ */
+    .field-label {
+      font-family: 'Space Grotesk', sans-serif;
+      font-size: 13px; font-weight: 600; letter-spacing: .3px;
+      text-transform: uppercase; color: var(--muted);
+      margin-bottom: 6px; display: block;
+    }
+    .g-input {
+      background: var(--surface) !important;
+      border: 1px solid var(--border) !important;
+      border-radius: var(--rSm) !important;
+      color: var(--text) !important;
+      font-family: 'Plus Jakarta Sans', sans-serif !important;
+      font-size: 15px !important;
+      padding: 11px 14px !important;
+      transition: border-color .2s, box-shadow .2s, background .2s;
+      width: 100%; outline: none;
+    }
+    .g-input::placeholder { color: #6B7280 !important; }
+    .g-input:focus {
+      border-color: var(--borderEm) !important;
+      box-shadow: 0 0 0 3px rgba(5,150,105,.1) !important;
+      background: #fff !important;
+    }
+
+    /* ================================================
+       BUTTONS
+    ================================================ */
+    .btn-em {
+      background: linear-gradient(135deg, var(--em) 0%, var(--emDark) 100%);
+      color: #fff !important; border: none !important;
+      border-radius: var(--rSm) !important;
+      font-family: 'Space Grotesk', sans-serif;
+      font-weight: 700; font-size: 15px;
+      padding: 11px 22px; cursor: pointer;
+      transition: transform .18s, box-shadow .2s, filter .18s;
+      display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+      position: relative; overflow: hidden; white-space: nowrap;
+    }
+    .btn-em::before {
+      content: ""; position: absolute;
+      top: 0; left: -100%; width: 55%; height: 100%;
+      background: linear-gradient(90deg, transparent, rgba(255,255,255,.2), transparent);
+      transition: left .45s;
+    }
+    .btn-em:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 4px 18px var(--emGlow), 0 2px 8px rgba(0,0,0,.1);
+      filter: brightness(1.06); color: #fff !important;
+    }
+    .btn-em:hover::before { left: 140%; }
+    .btn-em:active { transform: none; }
+
+    .btn-ghost {
+      background: #fff !important; color: var(--text) !important;
+      border: 2px solid var(--borderHi) !important;
+      border-radius: var(--rSm) !important;
+      font-family: 'Space Grotesk', sans-serif;
+      font-weight: 600; font-size: 15px;
+      padding: 11px 22px; cursor: pointer;
+      transition: background .18s, border-color .18s, transform .18s, box-shadow .18s;
+      display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+      box-shadow: var(--shadow-sm);
+    }
+    .btn-ghost:hover {
+      background: var(--surface) !important;
+      border-color: var(--borderEm) !important;
+      transform: translateY(-1px); color: var(--text) !important;
+    }
+
+    .btn-amb {
+      background: linear-gradient(135deg, var(--amb), var(--ambDark)) !important;
+      color: #fff !important; font-weight: 700 !important;
+      border: none !important;
+      border-radius: var(--rSm) !important;
+      font-family: 'Space Grotesk', sans-serif; font-size: 15px;
+      padding: 11px 20px; cursor: pointer;
+      transition: transform .18s, box-shadow .2s;
+      display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+      white-space: nowrap;
+    }
+    .btn-amb:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 4px 16px var(--ambGlow); color: #fff !important;
+    }
+
+    .btn-danger {
+      background: var(--roseLight) !important; color: #B91C1C !important;
+      border: 1px solid rgba(239,68,68,.3) !important;
+      border-radius: var(--rSm) !important;
+      font-family: 'Space Grotesk', sans-serif; font-size: 15px;
+      font-weight: 600; padding: 11px 22px; cursor: pointer;
+      transition: background .18s, border-color .18s;
+      display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    }
+    .btn-danger:hover {
+      background: rgba(239,68,68,.15) !important;
+      border-color: rgba(239,68,68,.4) !important; color: #B91C1C !important;
+    }
+
+    /* Small button variant */
+    .btn-sm-custom {
+      padding: 8px 14px !important;
+      font-size: 13px !important;
+      border-radius: var(--rXs) !important;
+    }
+    /* Full-width on xs */
+    @media (max-width: 575.98px) {
+      .btn-em, .btn-ghost { width: 100%; }
+    }
+
+    #roomHint { font-size: 13px; color: var(--em); font-weight: 600; margin-top: 8px; }
+
+    /* ================================================
+       SHARE LINK
+    ================================================ */
+    .link-icon-wrap {
+      width: 40px; height: 40px; border-radius: 10px; flex-shrink: 0;
+      background: var(--emLight); border: 1px solid rgba(5,150,105,.2);
+      display: flex; align-items: center; justify-content: center; font-size: 18px;
+    }
+    .link-title {
+      font-family: 'Bricolage Grotesque', sans-serif;
+      font-weight: 700; font-size: 15px; color: var(--text);
+    }
+    .link-sub { font-size: 13px; color: var(--muted); margin-top: 2px; }
+
+    #shareLinkInput {
+      background: var(--surface) !important;
+      border: 1px solid var(--border) !important;
+      border-right: none !important;
+      border-radius: var(--rXs) 0 0 var(--rXs) !important;
+      color: var(--text) !important;
+      font-family: 'Courier New', monospace !important;
+      font-size: 13px !important;
+      padding: 10px 14px !important;
+      flex: 1; outline: none; min-width: 0;
+    }
+    #shareLinkInput:focus {
+      border-color: var(--borderEm) !important;
+      box-shadow: 0 0 0 3px rgba(5,150,105,.08) !important;
+    }
+    .copy-attached { border-radius: 0 var(--rXs) var(--rXs) 0 !important; }
+
+    /* ================================================
+       CHAT
+    ================================================ */
+    #chatBox {
+      height: 200px !important; overflow-y: auto;
+      background: var(--surface) !important;
+      border: 1px solid var(--border) !important;
+      border-radius: var(--rSm) !important;
+      padding: 12px !important;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(17,24,39,.12) transparent;
+    }
+    #chatBox::-webkit-scrollbar { width: 4px; }
+    #chatBox::-webkit-scrollbar-thumb { background: rgba(17,24,39,.12); border-radius: 4px; }
+    .msg {
+      padding: 9px 13px; border-radius: 9px; margin-bottom: 8px;
+      background: #fff; border: 1px solid var(--border);
+      font-size: 14px; line-height: 1.6; color: var(--text);
+      box-shadow: var(--shadow-sm);
+    }
+
+    /* ================================================
+       DROP ZONE
+    ================================================ */
+    .drop-zone {
+      border: 2px dashed rgba(5,150,105,.25);
+      border-radius: var(--r);
+      padding: 36px 16px; text-align: center; cursor: pointer;
+      background: rgba(5,150,105,.02);
+      position: relative; overflow: hidden;
+      transition: border-color .25s, background .25s, box-shadow .25s;
+    }
+    .drop-zone:hover, .drop-zone.dragover {
+      border-color: var(--em); background: var(--emLight);
+      box-shadow: 0 0 0 4px rgba(5,150,105,.07);
+    }
+    .drop-zone input[type="file"] {
+      position: absolute; inset: 0; width: 100%; height: 100%;
+      opacity: 0; cursor: pointer; z-index: 2;
+    }
+    .drop-icon-wrap {
+      width: 64px; height: 64px; border-radius: 16px; margin: 0 auto 14px;
+      background: var(--emLight); border: 1px solid rgba(5,150,105,.2);
+      display: flex; align-items: center; justify-content: center; font-size: 1.8rem;
+      box-shadow: 0 4px 14px var(--emGlow);
+      transition: transform .25s, box-shadow .25s;
+    }
+    .drop-zone:hover .drop-icon-wrap, .drop-zone.dragover .drop-icon-wrap {
+      transform: translateY(-4px) scale(1.06);
+      box-shadow: 0 8px 24px var(--emGlow);
+    }
+    .drop-icon { font-size: 2rem; display: block; }
+    .drop-title {
+      font-family: 'Bricolage Grotesque', sans-serif;
+      font-weight: 700; font-size: 16px; color: var(--text); margin-bottom: 6px;
+    }
+    .drop-sub {
+      font-size: 14px; color: var(--muted);
+      max-width: 320px; margin: 0 auto; line-height: 1.6;
+    }
+    .dz-divider {
+      display: flex; align-items: center; gap: 10px;
+      margin: 14px auto; max-width: 160px;
+      font-size: 13px; font-weight: 600; color: #6B7280;
+    }
+    .dz-divider::before, .dz-divider::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+
+    /* ================================================
+       PROGRESS
+    ================================================ */
+    .progress-rail {
+      width: 100%; height: 6px;
+      background: var(--surface); border-radius: 999px; overflow: hidden;
+      border: 1px solid var(--border);
+    }
+    .progress-fill {
+      height: 100%; border-radius: 999px; width: 0%;
+      background: linear-gradient(90deg, var(--em), #10B981, var(--amb));
+      background-size: 200% 100%;
+      box-shadow: 0 0 6px var(--emGlow);
+      transition: width .35s ease;
+      animation: barShimmer 2.5s linear infinite;
+    }
+    @keyframes barShimmer {
+      0%   { background-position: 200% center; }
+      100% { background-position: -200% center; }
+    }
+    progress#progressBar { display: none !important; }
+
+    .stat-pill {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--rXs); padding: 6px 10px;
+      font-size: 13px; font-weight: 500; color: var(--muted);
+      display: inline-flex; align-items: center; gap: 4px;
+    }
+    .stat-pill b { color: var(--text); font-weight: 700; }
+
+    #fileStatus {
+      font-size: 14px; color: var(--muted); font-weight: 500;
+      display: flex; align-items: center; gap: 7px;
+    }
+    .g-divider { height: 1px; background: var(--border); margin: 16px 0; }
+
+    /* ================================================
+       MODAL
+    ================================================ */
     #modalBg {
-      position: fixed; inset:0; background: rgba(0,0,0,0.35);
-      display:none; align-items:center; justify-content:center;
-      z-index: 1050;
+      position: fixed; inset: 0;
+      background: rgba(17,24,39,.45);
+      backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+      display: none; align-items: center; justify-content: center;
+      z-index: 1050; padding: 16px;
     }
     #modal {
-      background:#fff; width: min(520px, 92vw);
-      border-radius: 12px; padding: 16px;
-      box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+      background: #fff !important;
+      border: 1px solid var(--border) !important;
+      border-radius: 18px !important; padding: 24px !important;
+      width: min(500px, 100%);
+      box-shadow: var(--shadow-lg) !important;
+      position: relative; overflow: hidden;
+      animation: modalIn .22s cubic-bezier(.2,.8,.2,1);
+    }
+    @keyframes modalIn {
+      from { opacity:0; transform:scale(.96) translateY(8px); }
+      to   { opacity:1; transform:none; }
+    }
+    #modal::before {
+      content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+      background: linear-gradient(90deg, var(--em), #10B981, var(--amb));
+    }
+    #modal .h5 {
+      font-family: 'Bricolage Grotesque', sans-serif;
+      font-weight: 700; font-size: 17px; color: var(--text); margin-bottom: 12px;
+    }
+    #modal pre {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--rXs); padding: 12px;
+      font-size: 14px; color: var(--muted); white-space: pre-wrap;
+    }
+
+    /* ================================================
+       FOOTER
+    ================================================ */
+    .page-footer {
+      border-top: 1px solid var(--border);
+      background: var(--surface);
+      position: relative; z-index: 1;
+    }
+    .footer-name {
+      font-family: 'Bricolage Grotesque', sans-serif;
+      font-weight: 700; font-size: 15px; color: var(--em);
+    }
+    .footer-tag   { font-size: 13px; color: var(--muted); }
+    .footer-icon {
+      width: 24px; height: 24px; border-radius: 6px; flex-shrink: 0;
+      background: linear-gradient(135deg, var(--em), var(--emDark));
+      display: flex; align-items: center; justify-content: center; font-size: 11px;
+    }
+    .footer-links a {
+      font-size: 13px; font-weight: 500; color: var(--muted);
+      text-decoration: none; transition: color .2s;
+    }
+    .footer-links a:hover { color: var(--em); }
+
+    /* ================================================
+       RESPONSIVE TWEAKS
+    ================================================ */
+
+    /* xs (< 576px) */
+    @media (max-width: 575.98px) {
+      .hero              { padding: 44px 0 32px; }
+      .hero.hero-compact { padding: 20px 0 16px; }
+      .g-card-body       { padding: 16px; }
+      .drop-zone         { padding: 28px 12px; }
+      .drop-icon-wrap    { width: 52px; height: 52px; font-size: 1.5rem; }
+      .stat-pill         { font-size: 12px; padding: 5px 8px; }
+      #chatBox           { height: 180px !important; }
+      .conn-pill #status { display: none; }
+    }
+
+    /* sm (576–767px) */
+    @media (min-width: 576px) and (max-width: 767.98px) {
+      .hero { padding: 56px 0 40px; }
     }
   </style>
 </head>
 
-<body class="bg-light">
-  <div class="container py-4">
-    <h2 class="mb-3">Welcome to Tranzo File Transfer (Default: Memory Download)</h2>
+<body>
+<div class="bg-canvas"></div>
+<div class="page-wrap">
 
-    <div class="card shadow-sm mb-3">
-      <div class="card-body">
-        <div class="row g-2 align-items-center">
-          <div class="col-md-3">
-            <!-- ✅ NEW: Device name -->
-            <input class="form-control" type="text" id="deviceName" placeholder="Your Device Name">
+  <!-- ================================================
+       NAVBAR  --  Bootstrap container for alignment
+  ================================================ -->
+  <nav class="nav-bar">
+    <div class="container-lg">
+      <div class="nav-inner">
+
+        <a href="/" class="nav-logo">
+          <span class="nav-logo-icon">&#9889;</span>
+          Tran<span class="dot">zo</span>
+        </a>
+
+        <div class="nav-right">
+          <!-- Status pill: show dot+text on sm+, dot-only on xs via CSS above -->
+          <div class="conn-pill">
+            <span class="conn-dot" id="connDot"></span>
+            <span id="status">Not Connected</span>
+          </div>
+          <!-- P2P badge: hidden on xs -->
+          <span class="nav-badge d-none d-sm-inline-block">P2P</span>
+        </div>
+
+      </div>
+    </div>
+  </nav>
+
+  <!-- ================================================
+       HERO
+  ================================================ -->
+  <section class="hero" id="heroSection">
+    <div class="container-lg">
+      <div class="row justify-content-center">
+        <div class="col-12 col-md-10 col-lg-8 col-xl-7">
+
+          <div class="hero-eyebrow">&#128274; WebRTC &middot; End-to-End Encrypted</div>
+
+          <h1>Transfer Files <span class="grad">Instantly.</span><br class="d-none d-sm-block">Zero Cloud. Zero Trace.</h1>
+
+          <p class="hero-sub">Your files fly directly between browsers via WebRTC &mdash; no server ever sees them. 100% free, no signup, no limits.</p>
+
+          <div class="trust-badges">
+            <span class="trust-badge">&#9889; Direct P2P</span>
+            <span class="trust-badge">&#128737; Zero Storage</span>
+            <span class="trust-badge">&#128515; Always Free</span>
+            <span class="trust-badge">&#128241; Any Device</span>
           </div>
 
-          <div class="col-md-3">
-            <input class="form-control" type="text" id="roomId" placeholder="Enter Room ID">
-          </div>
-
-          <div class="col-md-auto d-flex gap-2">
-            <button class="btn btn-outline-primary" id="createBtn">Create</button>
-            <button class="btn btn-primary" id="joinBtn">Join</button>
-          </div>
-
-          <div class="col-md">
-            <span class="dot" id="connDot"></span>
-            <span id="status" class="muted">Not Connected</span>
-            <div id="roomHint" class="muted mt-1"></div>
-          </div>
         </div>
       </div>
     </div>
+  </section>
 
-    <!-- ─── SHARE LINK PANEL (shown after room creation) ─── -->
-    <div class="card shadow-sm mb-3" id="shareLinkCard" style="display:none;">
-      <div class="card-body">
-        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
-          <span style="font-size:22px;">🔗</span>
-          <div>
-            <div style="font-weight:800;font-size:15px;">Share Download Link</div>
-            <div class="muted" style="font-size:12px;">Anyone who opens this link joins your room and can receive files automatically</div>
-          </div>
-        </div>
-        <div style="display:flex;gap:8px;align-items:center;">
-          <input class="form-control" type="text" id="shareLinkInput" readonly
-            style="font-size:13px;font-family:monospace;background:rgba(255,255,255,.85);" />
-          <button class="btn btn-primary btn-sm" id="copyLinkBtn" style="white-space:nowrap;min-width:80px;">
-            📋 Copy
-          </button>
-        </div>
-        <div id="shareLinkHint" class="muted mt-2" style="font-size:12px;display:none;">
-          ✅ Copied to clipboard!
-        </div>
-        <div class="muted mt-2" style="font-size:11px;opacity:.7;">
-          ⏳ Link is valid while you stay in this room. Select files above to share, then receivers open this link.
-        </div>
-      </div>
-    </div>
+  <!-- ================================================
+       APP
+  ================================================ -->
+  <main class="flex-grow-1">
+    <div class="container-lg">
+      <div class="row justify-content-center">
+        <div class="col-12 col-md-10 col-lg-8 col-xl-7 pb-5">
 
+          <!-- CONNECTION CARD — always visible -->
+          <div class="g-card strip-em">
+            <div class="g-card-body">
+              <div class="section-label">Connect to a Room</div>
 
-      <div class="card-body">
-        <div id="chatBox" class="border rounded p-2 bg-white"></div>
+              <div class="row g-3 align-items-end">
+                <!-- Device name -->
+                <div class="col-12 col-sm-6 col-md-5">
+                  <label class="field-label" for="deviceName">Your Name</label>
+                  <input class="g-input" type="text" id="deviceName"
+                    placeholder="e.g. Laptop Chrome" autocomplete="off" />
+                </div>
+                <!-- Room ID -->
+                <div class="col-12 col-sm-6 col-md-4">
+                  <label class="field-label" for="roomId">Room ID</label>
+                  <input class="g-input" type="text" id="roomId"
+                    placeholder="e.g. forest-42" autocomplete="off" />
+                </div>
+                <!-- Buttons: always side by side -->
+                <div class="col-12 col-md-3">
+                  <div class="d-flex gap-2">
+                    <button class="btn-ghost w-100" id="createBtn">Create</button>
+                    <button class="btn-em w-100"    id="joinBtn">Join &rarr;</button>
+                  </div>
+                </div>
+              </div>
 
-        <div class="row g-2 mt-2">
-          <div class="col">
-            <input class="form-control" type="text" id="messageInput" placeholder="Type message">
-          </div>
-          <div class="col-auto">
-            <button class="btn btn-success" id="sendBtn">Send</button>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div class="card shadow-sm">
-      <div class="card-body">
-        <h5 class="card-title mb-2">Send File (P2P)</h5>
-
-        <input class="form-control" type="file" id="fileInput" multiple />
-
-        <div class="muted mt-2">
-          Default: memory download (small/medium files). Large files will require disk saving (HTTPS/localhost).
-        </div>
-
-        <div class="mt-3">
-          <div id="fileStatus" class="muted mb-2">Idle</div>
-
-          <progress id="progressBar" value="0" max="100"></progress>
-
-          <div class="d-flex flex-wrap gap-3 align-items-center mt-2">
-            <div class="muted">
-              Progress: <b id="progressText">0%</b>
-            </div>
-            <div id="speedText" class="muted">Speed: 0 MB/s</div>
-            <div id="etaText" class="muted">Remaining: --</div>
-
-            <div class="ms-auto d-flex gap-2">
-              <button class="btn btn-outline-secondary btn-sm" id="pauseBtn" disabled>Pause</button>
-              <button class="btn btn-primary btn-sm" id="resumeBtn" disabled>Resume</button>
-              <button class="btn btn-outline-danger btn-sm" id="cancelBtn" disabled>Cancel</button>
+              <div id="roomHint"></div>
             </div>
           </div>
+
+          <!-- SHARE LINK PANEL -->
+          <div class="reveal-panel" id="shareLinkPanel">
+            <div class="g-card" id="shareLinkCard">
+              <div class="g-card-body">
+
+                <div class="d-flex align-items-start align-items-sm-center gap-3 mb-3">
+                  <div class="link-icon-wrap">&#128279;</div>
+                  <div>
+                    <div class="link-title">Invite via Link</div>
+                    <div class="link-sub">Share this link &mdash; anyone who opens it joins your room instantly</div>
+                  </div>
+                </div>
+
+                <!-- Input + copy button: always inline, wraps gracefully -->
+                <div class="d-flex align-items-stretch">
+                  <input type="text" id="shareLinkInput" readonly placeholder="Generating link&hellip;" />
+                  <button class="btn-em btn-sm-custom copy-attached flex-shrink-0" id="copyLinkBtn">&#128203; Copy</button>
+                </div>
+
+                <div id="shareLinkHint" class="mt-2"
+                  style="font-size:13px;color:var(--success);font-weight:600;display:none;">
+                  &#10003; Copied to clipboard!
+                </div>
+                <p class="mt-2 mb-0" style="font-size:13px;color:var(--muted);">&#8987; Expires when you leave the room</p>
+
+              </div>
+            </div>
+          </div>
+
+          <!-- CHAT PANEL -->
+          <div class="reveal-panel" id="chatPanel">
+            <div class="g-card" id="chatSection">
+              <div class="g-card-body">
+                <div class="section-label">Live Chat</div>
+                <div id="chatBox"></div>
+                <!-- Input row: input grows, button stays right -->
+                <div class="d-flex gap-2 mt-3">
+                  <input class="g-input flex-grow-1" type="text" id="messageInput"
+                    placeholder="Say something&hellip;" />
+                  <button class="btn-amb btn-sm-custom flex-shrink-0" id="sendBtn">Send &#8593;</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- FILE TRANSFER PANEL -->
+          <div class="reveal-panel" id="filePanel">
+            <div class="g-card strip-amb">
+              <div class="g-card-body">
+                <div class="section-label">Send Files</div>
+
+                <!-- Drop zone -->
+                <div class="drop-zone" id="dropZone">
+                  <input type="file" id="fileInput" multiple />
+                  <div class="drop-icon-wrap">
+                    <span class="drop-icon" style="margin:0;">&#128194;</span>
+                  </div>
+                  <div class="drop-title">Drop files here, or click to browse</div>
+                  <div class="drop-sub">Any type &middot; No size cap &middot; P2P &middot; Never stored</div>
+                  <div class="dz-divider">or browse</div>
+                </div>
+
+                <div class="g-divider"></div>
+
+                <!-- Status -->
+                <div id="fileStatus" class="mb-3">
+                  <span style="color:var(--muted2);font-size:13px;">&#9679;</span> Idle
+                </div>
+
+                <!-- Progress bar -->
+                <div class="progress-rail mb-1">
+                  <div class="progress-fill" id="progressFill"></div>
+                </div>
+                <progress id="progressBar" value="0" max="100"></progress>
+
+                <!-- Stats + controls: wrap on mobile, align right on sm+ -->
+                <div class="row g-2 align-items-center mt-3">
+                  <!-- Stat pills: wrap on xs -->
+                  <div class="col-12 col-sm">
+                    <div class="d-flex flex-wrap gap-2">
+                      <div class="stat-pill">Progress <b id="progressText">0%</b></div>
+                      <div id="speedText" class="stat-pill">Speed <b>0 MB/s</b></div>
+                      <div id="etaText"   class="stat-pill">ETA <b>--</b></div>
+                    </div>
+                  </div>
+                  <!-- Control buttons: full-width on xs, auto on sm+ -->
+                  <div class="col-12 col-sm-auto">
+                    <div class="d-flex flex-wrap gap-2">
+                      <button class="btn-ghost btn-sm-custom flex-fill flex-sm-grow-0"
+                        id="pauseBtn"  disabled>&#9208; Pause</button>
+                      <button class="btn-em    btn-sm-custom flex-fill flex-sm-grow-0"
+                        id="resumeBtn" disabled>&#9654; Resume</button>
+                      <button class="btn-danger btn-sm-custom flex-fill flex-sm-grow-0"
+                        id="cancelBtn" disabled>&#10005; Cancel</button>
+                    </div>
+                  </div>
+                </div>
+
+              </div>
+            </div>
+          </div>
+          <!-- /filePanel -->
+
+        </div><!-- /col -->
+      </div><!-- /row -->
+    </div><!-- /container -->
+  </main>
+
+  <!-- ================================================
+       FOOTER
+  ================================================ -->
+  <footer class="page-footer py-4">
+    <div class="container-lg">
+      <div class="row align-items-center gy-3">
+
+        <!-- Brand -->
+        <div class="col-12 col-sm-auto">
+          <div class="d-flex align-items-center gap-2">
+            <div class="footer-icon">&#9889;</div>
+            <div>
+              <div class="footer-name">Tranzo</div>
+              <div class="footer-tag">Files never touch our servers.</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Links — right-align from sm, center on xs -->
+        <div class="col-12 col-sm">
+          <div class="footer-links d-flex flex-wrap gap-3 justify-content-sm-end justify-content-center align-items-center">
+            <a href="/privacy">Privacy</a>
+            <a href="/about">About</a>
+            <span style="color:var(--muted);font-size:13px;font-weight:500;">WebRTC &middot; E2E Encrypted</span>
+          </div>
         </div>
 
       </div>
     </div>
-  </div>
+  </footer>
 
-  <!-- Incoming popup -->
-  <div id="modalBg">
-    <div id="modal" class="border">
-      <h3 class="h5">Incoming File</h3>
-      <pre id="modalInfo" class="muted mb-3" style="white-space: pre-wrap;"></pre>
+</div><!-- /page-wrap -->
 
-      <div class="d-flex justify-content-end gap-2">
-        <button class="btn btn-outline-danger" id="rejectBtn">Reject</button>
-        <button class="btn btn-primary" id="acceptBtn">Accept</button>
-      </div>
+<!-- INCOMING FILE MODAL -->
+<div id="modalBg">
+  <div id="modal">
+    <h3 class="h5">&#128229; Incoming File</h3>
+    <pre id="modalInfo"></pre>
+    <div class="d-flex flex-column flex-sm-row justify-content-sm-end gap-2 mt-3">
+      <button class="btn-danger w-100 w-sm-auto" id="rejectBtn">Reject</button>
+      <button class="btn-em    w-100 w-sm-auto" id="acceptBtn">Accept &amp; Save &rarr;</button>
     </div>
   </div>
+</div>
 
-  <script src="/socket.io/socket.io.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-  <script src="script.js"></script>
+<script src="/socket.io/socket.io.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 
-  <!-- aapka candy css same reh sakta hai (aapka already file me hai) -->
-</body>
-</html>
-  <style>
-    /* ====== TOFFEE / CANDY THEME (NO HTML CHANGES) ====== */
-@import url("https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap");
+<!-- BRIDGE 1: native progress.value -> visual fill bar -->
+<script>
+(function(){
+  var native = document.getElementById('progressBar');
+  var fill   = document.getElementById('progressFill');
+  if (!native || !fill) return;
+  var proto = HTMLProgressElement.prototype;
+  var desc  = Object.getOwnPropertyDescriptor(proto, 'value');
+  Object.defineProperty(native, 'value', {
+    get: function()  { return desc.get.call(this); },
+    set: function(v) {
+      desc.set.call(this, v);
+      fill.style.width = ((v / this.max) * 100) + '%';
+    }
+  });
+})();
+</script>
 
-:root{
-  --bg1:#fff6f0;          /* creamy */
-  --bg2:#ffe7f1;          /* strawberry milk */
-  --card:rgba(255,255,255,.78);
-  --cardBorder:rgba(255,255,255,.55);
+<!-- BRIDGE 2: drop zone drag highlight -->
+<script>
+(function(){
+  var dz = document.getElementById('dropZone');
+  if (!dz) return;
+  ['dragenter','dragover'].forEach(function(ev) {
+    dz.addEventListener(ev, function(e) { e.preventDefault(); dz.classList.add('dragover'); });
+  });
+  ['dragleave','drop'].forEach(function(ev) {
+    dz.addEventListener(ev, function() { dz.classList.remove('dragover'); });
+  });
+})();
+</script>
 
-  --text:#2a1b1b;
-  --muted:#6f5a5a;
+<!--
+  BRIDGE 3: Progressive Reveal Interceptor
 
-  --primary:#ff4d6d;      /* candy pink */
-  --primary2:#ff8a00;     /* caramel orange */
-  --success:#16a34a;
-  --danger:#ef4444;
+  script.js sets element.style.display = 'block'|'none'
+  on #shareLinkCard and #chatSection.
 
-  --shadow: 0 18px 50px rgba(31, 12, 12, 0.18);
-  --shadowSm: 0 10px 26px rgba(31, 12, 12, 0.12);
+  We Proxy .style so those writes toggle .is-visible on the
+  parent .reveal-panel -> smooth CSS max-height transition.
 
-  --r12: 12px;
-  --r16: 16px;
-  --r20: 20px;
-}
+  filePanel revealed by EITHER shareLinkCard (sender)
+  OR chatSection (receiver) — both sides get the file panel.
 
-/* Base */
-*{ box-sizing:border-box; }
-body{
-  font-family:"Plus Jakarta Sans", system-ui, -apple-system, "Segoe UI", Roboto, Arial;
-  color:var(--text);
-  min-height:100vh;
-  /* toffee swirl background */
-  background:
-    radial-gradient(1200px 800px at 10% 0%, rgba(255, 138, 0, .20), transparent 60%),
-    radial-gradient(900px 700px at 90% 15%, rgba(255, 77, 109, .22), transparent 55%),
-    radial-gradient(900px 800px at 50% 110%, rgba(255, 199, 0, .18), transparent 60%),
-    linear-gradient(135deg, var(--bg1), var(--bg2));
-}
+  script.js NOT modified. All IDs intact. SEO safe.
+-->
+<script>
+(function() {
 
-/* Make container feel premium */
-.container{
-  max-width: 980px;
-}
+  function interceptDisplay(el, panel, onShow, onHide) {
+    if (!el || !panel) return;
+    var real = el.style;
+    var proxy = new Proxy(real, {
+      set: function(t, prop, val) {
+        if (prop === 'display') {
+          var show = val !== 'none' && val !== '';
+          panel.classList.toggle('is-visible', show);
+          if (show  && onShow) onShow();
+          if (!show && onHide) onHide();
+          try { t[prop] = val; } catch(e){}
+          return true;
+        }
+        try { t[prop] = val; } catch(e){}
+        return true;
+      },
+      get: function(t, prop) {
+        var v = t[prop];
+        return typeof v === 'function' ? v.bind(t) : v;
+      }
+    });
+    Object.defineProperty(el, 'style', { get: function(){ return proxy; }, configurable: true });
+  }
 
-/* Title */
-h2{
-  font-weight:800;
-  letter-spacing:-0.02em;
-  margin-bottom:14px !important;
-  background: linear-gradient(90deg, var(--primary), var(--primary2));
-  -webkit-background-clip:text;
-  background-clip:text;
-  color:transparent;
-}
+  function compactHero() {
+    var h = document.getElementById('heroSection');
+    if (h) h.classList.add('hero-compact');
+  }
 
-/* Cards: glassy candy */
-.card{
-  border: 1px solid var(--cardBorder) !important;
-  background: var(--card) !important;
-  border-radius: var(--r20) !important;
-  box-shadow: var(--shadowSm) !important;
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  overflow:hidden;
-}
-.card-body{
-  padding: 18px !important;
-}
+  function revealFilePanel() {
+    var fp = document.getElementById('filePanel');
+    if (fp) fp.classList.add('is-visible');
+  }
 
-/* “soft top highlight” */
-.card::before{
-  content:"";
-  display:block;
-  height: 10px;
-  background: linear-gradient(90deg, rgba(255,77,109,.85), rgba(255,138,0,.85));
-  opacity:.25;
-}
+  function hideFilePanel() {
+    var slc = document.getElementById('shareLinkCard');
+    var cs  = document.getElementById('chatSection');
+    var slcHidden = !slc || slc.style.display === 'none' || slc.style.display === '';
+    var csHidden  = !cs  || cs.style.display  === 'none' || cs.style.display  === '';
+    if (slcHidden && csHidden) {
+      var fp = document.getElementById('filePanel');
+      if (fp) fp.classList.remove('is-visible');
+    }
+  }
 
-/* Inputs */
-.form-control{
-  border-radius: 14px !important;
-  border: 1px solid rgba(60,20,20,.12) !important;
-  background: rgba(255,255,255,.82) !important;
-  box-shadow: 0 6px 16px rgba(40,12,12,.06);
-  padding: 12px 14px !important;
-}
-.form-control:focus{
-  border-color: rgba(255,77,109,.45) !important;
-  box-shadow:
-    0 0 0 0.2rem rgba(255,77,109,.18) !important;
-    /* 0 10px 22px rgba(40,12,12,.10) !important; */
-}
+  document.addEventListener('DOMContentLoaded', function() {
 
-/* Muted text */
-.muted{
-  color: var(--muted) !important;
-}
+    /* Sender path */
+    interceptDisplay(
+      document.getElementById('shareLinkCard'),
+      document.getElementById('shareLinkPanel'),
+      function() { revealFilePanel(); compactHero(); },
+      function() { hideFilePanel(); }
+    );
 
-/* Buttons – candy gradient */
-.btn{
-  border-radius: 14px !important;
-  font-weight:700 !important;
-  letter-spacing: .2px;
-  padding: 10px 14px !important;
-  transition: transform .12s ease, box-shadow .12s ease, filter .12s ease;
-}
-.btn:active{ transform: translateY(1px); }
-.btn:hover{
-  transform: translateY(-1px);
-  box-shadow: 0 14px 26px rgba(40,12,12,.12);
-}
+    /* Receiver path */
+    interceptDisplay(
+      document.getElementById('chatSection'),
+      document.getElementById('chatPanel'),
+      function() { revealFilePanel(); compactHero(); },
+      function() { hideFilePanel(); }
+    );
 
-/* Primary = candy pink→orange */
-.btn-primary{
-  border: 0 !important;
-  background: linear-gradient(135deg, var(--primary), var(--primary2)) !important;
-}
-.btn-primary:hover{ filter: brightness(1.03); }
+    /* Instant hero compact on Create/Join */
+    ['createBtn','joinBtn'].forEach(function(id) {
+      var btn = document.getElementById(id);
+      if (btn) btn.addEventListener('click', compactHero);
+    });
 
-/* Outline primary = glossy */
-.btn-outline-primary{
-  border: 1px solid rgba(255,77,109,.55) !important;
-  color: #b31a3b !important;
-  background: rgba(255,255,255,.55) !important;
-}
-.btn-outline-primary:hover{
-  color: #fff !important;
-  border-color: transparent !important;
-  background: linear-gradient(135deg, rgba(255,77,109,.95), rgba(255,138,0,.95)) !important;
-}
+  });
+})();
+</script>
 
-/* Success button */
-.btn-success{
-  border:0 !important;
-  background: linear-gradient(135deg, #22c55e, #16a34a) !important;
-}
-
-/* Small control buttons */
-.btn-sm{
-  border-radius: 12px !important;
-  padding: 8px 12px !important;
-}
-.btn-outline-secondary{
-  background: rgba(255,255,255,.55) !important;
-  border: 1px solid rgba(60,20,20,.16) !important;
-}
-.btn-outline-danger{
-  background: rgba(255,255,255,.55) !important;
-  border: 1px solid rgba(239,68,68,.45) !important;
-}
-
-/* Connection dot glow */
-.dot{
-  box-shadow: 0 0 0 4px rgba(220,53,69,.12);
-}
-.dot.green{
-  box-shadow: 0 0 0 4px rgba(25,135,84,.14);
-}
-
-/* Chat box */
-#chatBox{
-  height: 240px !important;
-  border-radius: 16px !important;
-  border: 1px solid rgba(60,20,20,.10) !important;
-  background:
-    radial-gradient(600px 260px at 0% 0%, rgba(255,138,0,.12), transparent 55%),
-    radial-gradient(600px 260px at 100% 0%, rgba(255,77,109,.12), transparent 55%),
-    rgba(255,255,255,.78) !important;
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.55);
-}
-
-/* Messages (if you use .msg inside chat) */
-.msg{
-  padding: 10px 12px;
-  border-radius: 14px;
-  background: rgba(255,255,255,.72);
-  border: 1px solid rgba(60,20,20,.08);
-  box-shadow: 0 8px 18px rgba(40,12,12,.06);
-}
-.msg .muted{
-  font-size: 12px !important;
-}
-
-/* Progress (native <progress>) */
-progress{
-  width:100%;
-  height: 18px;
-  border-radius: 999px;
-  overflow:hidden;
-  background: rgba(255,255,255,.55);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.6), 0 10px 22px rgba(40,12,12,.08);
-  border: 1px solid rgba(60,20,20,.10);
-}
-progress::-webkit-progress-bar{
-  background: rgba(255,255,255,.55);
-}
-progress::-webkit-progress-value{
-  background: linear-gradient(90deg, var(--primary), var(--primary2));
-  border-radius: 999px;
-}
-progress::-moz-progress-bar{
-  background: linear-gradient(90deg, var(--primary), var(--primary2));
-  border-radius: 999px;
-}
-
-/* File section headings */
-.card-title{
-  font-weight: 800 !important;
-  letter-spacing:-0.01em;
-}
-
-/* Modal overlay + modal candy glass */
-#modalBg{
-  background: rgba(20,10,10,0.45) !important;
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
-}
-#modal{
-  border: 1px solid rgba(255,255,255,.55) !important;
-  border-radius: 18px !important;
-  background:
-    radial-gradient(700px 300px at 10% 0%, rgba(255,138,0,.18), transparent 60%),
-    radial-gradient(700px 300px at 90% 0%, rgba(255,77,109,.18), transparent 60%),
-    rgba(255,255,255,.82) !important;
-  box-shadow: var(--shadow) !important;
-}
-
-/* Pre in modal */
-#modal pre{
-  background: rgba(255,255,255,.65);
-  border: 1px dashed rgba(60,20,20,.18);
-  border-radius: 14px;
-  padding: 10px 12px;
-}
-
-/* Small polish on borders used in HTML */
-.border{
-  border-color: rgba(60,20,20,.10) !important;
-}
-.bg-white{
-  background: rgba(255,255,255,.78) !important;
-}
-
-/* Make layout breathe on mobile */
-@media (max-width: 576px){
-  .card-body{ padding: 14px !important; }
-  h2{ font-size: 1.35rem; }
-  #chatBox{ height: 220px !important; }
-}
-  </style>
+<script src="script.js"></script>
 </body>
 </html>

@@ -97,6 +97,26 @@ function noSleepStop() {
 
 document.addEventListener("visibilitychange", () => {
   dlog(document.hidden ? "Tab hidden — NoSleep:" : "Tab visible", _noSleepActive);
+
+  if (!document.hidden) {
+    // Tab came back to foreground (e.g. user returned from Android file picker / gallery).
+    // Android OS throttles background tabs and may kill ICE keepalive pings, causing
+    // iceConnectionState → "disconnected" or "failed" while the tab was hidden.
+    // On return: check each peer connection and trigger ICE restart if needed.
+    setTimeout(() => {
+      peerConnections.forEach((peer, socketId) => {
+        if (!peer || !peer.pc) return;
+        const iceState  = peer.pc.iceConnectionState;
+        const connState = peer.pc.connectionState;
+        if (iceState === "disconnected" || iceState === "failed" ||
+            connState === "disconnected" || connState === "failed") {
+          dlog("Tab restored — ICE in bad state, triggering restart for", socketId, iceState);
+          addMsg(`<span class="muted">🔄 Reconnecting after app switch...</span>`);
+          handlePeerFailed(socketId);
+        }
+      });
+    }, 800); // short delay to let the network settle after returning from background
+  }
 });
 
 // ─── MOBILE DETECTION ─────────────────────────────────────────────────────────
@@ -224,10 +244,12 @@ function applyNetworkProfile() {
   // Mobile: do NOT reduce pipeline — Android Chrome handles 32 depth fine on WiFi
   NET.pipelineDepth = Math.max(4, Math.min(64, depth));
 
-  // High-water mark: 16MB ceiling (Chrome's DataChannel buffer limit is 16MB).
-  // Low-water mark: resume sending when buffer drains to 4 chunks.
-  NET.highWaterMark = Math.min(16 * 1024 * 1024, NET.chunkSize * 64);
-  NET.lowWaterMark  = NET.chunkSize * 4;
+  // High-water mark: cap at 4MB (Chrome's practical DataChannel send queue limit
+  // before "send queue is full" errors. 16MB theoretical max is never safe in practice
+  // on Android where the SCTP send buffer is much smaller).
+  // Low-water mark: resume when buffer drains to 1 chunk.
+  NET.highWaterMark = Math.min(4 * 1024 * 1024, NET.chunkSize * 16);
+  NET.lowWaterMark  = NET.chunkSize;
 
   dlog("[NET] profile", {
     path: pathType,
@@ -1695,15 +1717,23 @@ async function sendFile(file) {
     }
     const now = performance.now();
     if (sendState.offset === _stallLastOffset && (now - _stallLastChecked) >= 4000) {
-      dlog("[SEND] stall detected — kicking pipeline (offset stuck at", fmtBytes(sendState.offset), ")");
-      addMsg(`<span class="muted">⚠️ Transfer stalled — retrying...</span>`);
-      waitingDrain = false;
-      loopRunning  = false;
-      // Re-seed worker if queue is empty
-      if (chunkQueue.length === 0 && !workerDone) {
-        for (let i = 0; i < NET.pipelineDepth; i++) fileWorker.postMessage({ type: "pull" });
+      const dc = getDc();
+      // Only kick if DC is open AND buffer has actually drained.
+      // If buffer is still full, we must NOT call sendLoop() — that's what caused
+      // "send queue is full" errors. The bufferedamountlow event will kick us when ready.
+      if (dc && dc.readyState === "open" && dc.bufferedAmount < NET.highWaterMark) {
+        dlog("[SEND] stall detected — kicking pipeline (offset stuck at", fmtBytes(sendState.offset), ")");
+        addMsg(`<span class="muted">⚠️ Transfer stalled — retrying...</span>`);
+        waitingDrain = false;
+        loopRunning  = false;
+        if (chunkQueue.length === 0 && !workerDone) {
+          for (let i = 0; i < NET.pipelineDepth; i++) fileWorker.postMessage({ type: "pull" });
+        }
+        sendLoop();
+      } else if (dc && dc.readyState !== "open") {
+        dlog("[SEND] stall watchdog: DC not open, waiting for reconnect");
       }
-      sendLoop();
+      // If buffer is full — don't log or kick, bufferedamountlow will handle it
     }
     _stallLastOffset  = sendState.offset;
     _stallLastChecked = now;

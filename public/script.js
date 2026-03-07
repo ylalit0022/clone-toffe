@@ -190,38 +190,43 @@ const MOBILE_MAX_CHUNK = 256 * 1024;
 function applyNetworkProfile() {
   const { pathType, rttMs, availBps } = NET;
 
-  // Pick a base chunk size by path type
-  if (pathType === "lan") {
-    NET.chunkSize = 256 * 1024;   // max allowed — pipeline depth gives throughput
-  } else if (pathType === "wan") {
-    NET.chunkSize = 128 * 1024;
-  } else if (pathType === "turn") {
+  // Chunk size by path type.
+  // WAN and LAN both use 256KB — the SCTP hard limit. Throughput difference
+  // comes from pipeline depth, not chunk size. The old 128KB WAN cap halved
+  // throughput for no benefit. TURN relays are the only case needing smaller
+  // chunks because the relay server itself is a bottleneck.
+  if (pathType === "turn") {
     NET.chunkSize = NET.turnSlowReduced ? 32 * 1024 : 64 * 1024;
   } else {
-    NET.chunkSize = 128 * 1024;   // unknown — conservative
+    // lan / wan / unknown — all get max 256KB
+    NET.chunkSize = 256 * 1024;
   }
 
-  // Hard caps
+  // Hard cap (Chrome SCTP limit)
   NET.chunkSize = Math.min(NET.chunkSize, MAX_CHUNK_SIZE);
+  // Mobile uses same cap as desktop — 256KB is safe on Android Chrome M70+
   if (IS_MOBILE) NET.chunkSize = Math.min(NET.chunkSize, MOBILE_MAX_CHUNK);
 
-  // Dynamic pipeline depth — deeper pipeline on LAN compensates for smaller chunks
-  // LAN target: keep ~8MB in flight → 8MB / 256KB = 32 chunks
+  // Pipeline depth — how many chunks are in flight simultaneously.
+  // If availBps and rttMs are known, compute BDP-optimal depth.
+  // Otherwise use path-based defaults. rttMs=0 at first detection (Chrome takes
+  // ~1-2s to report RTT), so we use generous defaults rather than tiny fallbacks.
   let depth;
   if (availBps > 0 && rttMs > 0) {
     const bdp = (availBps / 8) * (rttMs / 1000);
     depth = Math.round(bdp / NET.chunkSize);
   } else {
-    if (pathType === "lan")        depth = 32;   // 32 × 256KB = 8MB in flight
-    else if (rttMs < 5)            depth = 32;
-    else if (rttMs < 30)           depth = 16;
-    else if (rttMs < 100)          depth = 12;
-    else                           depth = 16;   // mobile gets same depth as desktop — old value of 8 was too shallow
+    if (pathType === "lan")         depth = 32;   // 32 × 256KB = 8MB in flight
+    else if (pathType === "wan")    depth = 24;   // WAN: 24 × 256KB = 6MB in flight
+    else if (pathType === "turn")   depth = 8;    // TURN relay: conservative
+    else                            depth = 24;   // unknown: treat like WAN
   }
+  // Mobile: do NOT reduce pipeline — Android Chrome handles 32 depth fine on WiFi
   NET.pipelineDepth = Math.max(4, Math.min(64, depth));
 
-  // Buffer marks scaled to chunk size; stay under Chrome's 16MB SCTP limit
-  NET.highWaterMark = Math.min(8 * 1024 * 1024, NET.chunkSize * 32);
+  // High-water mark: 16MB ceiling (Chrome's DataChannel buffer limit is 16MB).
+  // Low-water mark: resume sending when buffer drains to 4 chunks.
+  NET.highWaterMark = Math.min(16 * 1024 * 1024, NET.chunkSize * 64);
   NET.lowWaterMark  = NET.chunkSize * 4;
 
   dlog("[NET] profile", {
@@ -230,6 +235,18 @@ function applyNetworkProfile() {
     depth: NET.pipelineDepth,
     hwm: `${(NET.highWaterMark / 1024 / 1024).toFixed(2)}MB`,
   });
+}
+
+// Returns true if an IP string is an RFC1918 private (LAN) address
+function isPrivateIP(ip) {
+  if (!ip) return false;
+  // IPv4 private ranges: 10.x, 172.16-31.x, 192.168.x
+  if (/^10\./.test(ip)) return true;
+  if (/^192\.168\./.test(ip)) return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return true;
+  // IPv6 link-local
+  if (/^fe80:/i.test(ip)) return true;
+  return false;
 }
 
 async function detectAndApplyNetworkProfile(pcRef) {
@@ -243,12 +260,28 @@ async function detectAndApplyNetworkProfile(pcRef) {
     const remote = stats.get(pair.remoteCandidateId);
     const lt = local?.candidateType ?? "";
     const rt = remote?.candidateType ?? "";
+    const localIp  = local?.address  ?? local?.ip  ?? "";
+    const remoteIp = remote?.address ?? remote?.ip ?? "";
     NET.rttMs    = (pair.currentRoundTripTime ?? 0) * 1000;
     NET.availBps = pair.availableOutgoingBitrate ?? 0;
-    if (lt === "host" && rt === "host")       NET.pathType = "lan";
-    else if (lt === "relay" || rt === "relay") NET.pathType = "turn";
-    else if (lt === "srflx" || rt === "srflx") NET.pathType = "wan";
-    else                                       NET.pathType = "unknown";
+
+    // ── Path type detection ─────────────────────────────────────────────────
+    // IMPORTANT: Chrome can report host↔srflx even on same LAN (it replaces
+    // srflx with host base internally but may flip back on binding response).
+    // Primary signal: if both IPs are RFC1918 private → it's LAN regardless
+    // of candidate type. Candidate type alone is unreliable for LAN detection.
+    if (lt === "relay" || rt === "relay") {
+      NET.pathType = "turn";
+    } else if (isPrivateIP(localIp) && isPrivateIP(remoteIp)) {
+      // Both IPs are private → same LAN, regardless of srflx/host label
+      NET.pathType = "lan";
+    } else if (lt === "host" && rt === "host") {
+      // Both host but one may be public IP (unusual) — treat as lan still
+      NET.pathType = "lan";
+    } else {
+      NET.pathType = "wan";
+    }
+
     NET.turnSlowSamples = [];
     NET.turnSlowReduced = false;
     applyNetworkProfile();
@@ -703,8 +736,14 @@ function addChatBubble({ user, text, mine }) {
 // Typing indicator
 const typingLine = document.createElement("div");
 typingLine.className = "typingLine"; typingLine.style.display = "none";
-if (chatSection) chatSection.appendChild(typingLine);
-function showTyping(text) { typingLine.innerText = text; typingLine.style.display = text ? "block" : "none"; }
+// Append inside chatBox so it scrolls into view; chatBox is the scroll container.
+if (chatBox) chatBox.appendChild(typingLine);
+else if (chatSection) chatSection.appendChild(typingLine);
+function showTyping(text) {
+  typingLine.innerText = text;
+  typingLine.style.display = text ? "block" : "none";
+  if (text && chatBox) chatBox.scrollTop = chatBox.scrollHeight;
+}
 
 // ─── DEVICE NAME ──────────────────────────────────────────────────────────────
 function defaultDeviceName() {
@@ -796,7 +835,7 @@ function joinRoom(roomId, mode) {
   currentRoom = roomId;
   loadAutoAcceptFlag();
   socket.emit("join-room", { roomId, deviceName: getDeviceName() });
-  chatSection.style.display = "block";
+  if (chatSection) chatSection.style.display = "block";
   if (mode === "create") {
     setConnectedUI(false, "Room created", `Room: ${roomId} — Waiting...`);
     addMsg(`<span class="muted">🆕 Room: <b>${roomId}</b> (waiting...)</span>`);
@@ -826,12 +865,12 @@ socket.on("typing", ({ user }) => { if (user) showTyping(`${user} is typing...`)
 socket.on("stop-typing", () => showTyping(""));
 sendBtn.onclick = () => {
   const msg = messageInput.value.trim(); if (!msg) return;
-  socket.emit("send-message", msg);
+  socket.emit("chat-msg", { text: msg });
   addChatBubble({ user: "You", text: msg, mine: true });
   messageInput.value = "";
   socket.emit("stop-typing", { roomId: currentRoom, user: getDeviceName() });
 };
-socket.on("receive-message", data => { if (!data.fromSelf) addChatBubble({ user: data.user || "Peer", text: data.text || "", mine: false }); });
+socket.on("chat-msg", data => { if (data.from !== socket.id) addChatBubble({ user: data.name || "Peer", text: data.text || "", mine: false }); });
 
 // ─── DRAG & DROP ──────────────────────────────────────────────────────────────
 function enableDragDrop() {
@@ -1371,35 +1410,43 @@ rejectBtn.onclick = () => {
 
 acceptBtn.onclick = async () => {
   if (!pendingIncoming) return;
-  transferCompleted = false; gracefulClosing = false; resetReceiverReady(); retryInProgress = false;
   const meta = pendingIncoming.meta;
+  const isLargeFile = meta.size > MEMORY_MAX_BYTES;
   const canDisk = "showSaveFilePicker" in window && window.isSecureContext;
   let writable = null;
 
-  // Ask for save location for ALL files (not just large ones).
-  // Previously only files >300MB triggered showSaveFilePicker — small files
-  // used auto-download via a.click() which Android Chrome silently blocks
-  // unless it happens inside a direct user gesture on the same tick.
-  // Asking here (inside the onclick, which IS a user gesture) works on Android.
-  if (canDisk) {
-    try {
-      const handle = await window.showSaveFilePicker({ suggestedName: meta.name });
-      writable = await handle.createWritable();
-      addMsg(`<span class="muted">💾 Save location chosen. Connecting...</span>`);
-    } catch {
-      addMsg(`<span class="muted">❌ Save dialog canceled.</span>`);
+  // ── LARGE FILES (>300MB): must stream to disk ──────────────────────────────
+  // showSaveFilePicker MUST be called here, synchronously as the FIRST async
+  // operation in this onclick handler, while transient user activation is still
+  // valid. Any await before this call consumes the activation and auto-cancels.
+  // MDN: "Transient user activation expires after a timeout and may be consumed
+  //       by some APIs." — developer.mozilla.org/Web/Security/User_activation
+  if (isLargeFile) {
+    if (!canDisk) {
+      addMsg(`<span class="muted">⚠️ Large file (${fmtBytes(meta.size)}) requires HTTPS to save to disk.</span>`);
       socket.emit("file-answer", { to: pendingIncoming.from, accepted: false });
       pendingIncoming = null; modalBg.style.display = "none"; return;
     }
-  } else {
-    // Fallback for non-HTTPS or browsers without File System Access API —
-    // will use in-memory Blob + a.click() at the end (best effort on desktop).
-    if (meta.size > MEMORY_MAX_BYTES) {
-      addMsg(`<span class="muted">⚠️ Large file needs HTTPS for disk saving.</span>`);
+    try {
+      // Called FIRST — no awaits above this, so transient activation is intact
+      const handle = await window.showSaveFilePicker({ suggestedName: meta.name });
+      writable = await handle.createWritable();
+      addMsg(`<span class="muted">💾 Save location chosen: ${meta.name}</span>`);
+    } catch (err) {
+      // AbortError = user clicked Cancel in the dialog (legitimate cancel)
+      // SecurityError = lost transient activation (should not happen here)
+      const reason = err?.name === "AbortError" ? "dialog canceled" : `error: ${err?.name}`;
+      addMsg(`<span class="muted">❌ Save ${reason}. Transfer aborted.</span>`);
       socket.emit("file-answer", { to: pendingIncoming.from, accepted: false });
       pendingIncoming = null; modalBg.style.display = "none"; return;
     }
   }
+  // ── SMALL FILES (<300MB): Blob + auto-download — NO dialog needed ──────────
+  // showSaveFilePicker is intentionally NOT called for small files.
+  // The file will be assembled in memory and downloaded via <a download> at end.
+  // This is reliable on all browsers including Android Chrome and Firefox.
+
+  transferCompleted = false; gracefulClosing = false; resetReceiverReady(); retryInProgress = false;
 
   pendingWritable = writable;
   socket.emit("file-answer", { to: pendingIncoming.from, accepted: true });
@@ -1634,9 +1681,38 @@ async function sendFile(file) {
     if (delta > 0 && !workerDone) for (let i = 0; i < delta; i++) fileWorker.postMessage({ type: "pull" });
   });
 
+  // ── SENDER STALL WATCHDOG ─────────────────────────────────────────────────
+  // Problem: if the DC buffer never drains (Android SCTP flow control stall),
+  // waitingDrain stays true, chunkQueue empties, the 2s fallback fires sendLoop()
+  // but finds nothing to send → transfer silently stops with no error.
+  // Fix: poll every 4s; if offset hasn't advanced and we're not done, force-kick
+  // the pipeline by clearing waitingDrain and re-seeding the worker.
+  let _stallLastOffset  = 0;
+  let _stallLastChecked = performance.now();
+  const _stallWatchdog  = setInterval(() => {
+    if (!sendState.running || sendState.canceled || allSent || workerDone) {
+      clearInterval(_stallWatchdog); return;
+    }
+    const now = performance.now();
+    if (sendState.offset === _stallLastOffset && (now - _stallLastChecked) >= 4000) {
+      dlog("[SEND] stall detected — kicking pipeline (offset stuck at", fmtBytes(sendState.offset), ")");
+      addMsg(`<span class="muted">⚠️ Transfer stalled — retrying...</span>`);
+      waitingDrain = false;
+      loopRunning  = false;
+      // Re-seed worker if queue is empty
+      if (chunkQueue.length === 0 && !workerDone) {
+        for (let i = 0; i < NET.pipelineDepth; i++) fileWorker.postMessage({ type: "pull" });
+      }
+      sendLoop();
+    }
+    _stallLastOffset  = sendState.offset;
+    _stallLastChecked = now;
+  }, 4000);
+
   // ── FINALIZE ──────────────────────────────────────────────────────────────
   async function finalizeSend() {
     stopRttPolling();
+    clearInterval(_stallWatchdog);
     // Clean up reconnect hooks — no more data to send
     sendState._onReconnect       = null;
     sendState._onResumeConfirmed = null;
@@ -1764,36 +1840,78 @@ async function startReceiver(meta) {
   try { const id = meta?.id || `${meta?.name}|${meta?.size}`; upsertRecvItem(id, meta.name, meta.size || 0, "receiving", 0, meta.size || 0); renderRecvQueueUI(); } catch {}
 
   // Use disk streaming for any file where the user pre-chose a save location
-  // (pendingWritable set in acceptBtn.onclick), OR for files >300MB which
-  // always require disk. Small files without a pendingWritable fall back to
-  // in-memory Blob mode (non-HTTPS / File System Access API not available).
+  // (pendingWritable set in acceptBtn.onclick for large files).
+  // Small files (no pendingWritable) use in-memory Blob + auto-download.
   const needDisk = meta.size > MEMORY_MAX_BYTES;
   if (pendingWritable) {
-    // Consume the pre-chosen writable (covers both small and large files)
+    // Consume the pre-chosen writable (large files only)
     incomingFile.writable = pendingWritable;
     pendingWritable = null;
     addMsg(`<span class="muted">💾 Saving to disk: ${meta.name}</span>`);
   } else if (needDisk) {
-    // Large file but no pendingWritable — shouldn't happen in normal flow
-    // (acceptBtn should have set it), but handle gracefully as fallback.
+    // Large file but no pendingWritable — happens when auto-accept is on,
+    // which skips acceptBtn and never calls showSaveFilePicker.
+    // We cannot call showSaveFilePicker here (no user gesture = auto-canceled).
+    // Solution: show a clickable button so the user provides the gesture themselves.
     const canDisk = "showSaveFilePicker" in window && window.isSecureContext;
     if (!canDisk) {
       addMsg(`<span class="muted">⚠️ Large file needs HTTPS for disk saving.</span>`);
       setStatus("⚠️ Large file needs HTTPS/localhost."); incomingFile = null; return;
     }
-    try {
-      const handle = await window.showSaveFilePicker({ suggestedName: meta.name });
-      incomingFile.writable = await handle.createWritable();
-      addMsg(`<span class="muted">💾 Saving to disk...</span>`);
-    } catch {
-      addMsg(`<span class="muted">❌ Save dialog canceled.</span>`);
-      setStatus("❌ Save canceled."); incomingFile = null; return;
+    // Pause receiving until user picks a location
+    addMsg(`<span class="muted">💾 Large file — <button id="chooseSaveBtn" style="cursor:pointer;padding:2px 8px;border-radius:6px;border:1px solid #aaa;background:#fff;font-size:13px">Choose save location</button></span>`);
+    setStatus("⏳ Waiting for save location...");
+    const btn = document.getElementById("chooseSaveBtn");
+    if (btn) {
+      btn.onclick = async () => {
+        btn.disabled = true; btn.textContent = "Opening...";
+        try {
+          const handle = await window.showSaveFilePicker({ suggestedName: meta.name });
+          incomingFile.writable = await handle.createWritable();
+          addMsg(`<span class="muted">💾 Saving to disk: ${meta.name}</span>`);
+          setStatus(`Receiving: ${meta.name}`);
+          // Kick off the transfer now that we have a writable
+          try { window.dc?.send(JSON.stringify({ type: "ready" })); } catch {}
+        } catch (err) {
+          const reason = err?.name === "AbortError" ? "canceled" : err?.name;
+          addMsg(`<span class="muted">❌ Save location ${reason}. Transfer aborted.</span>`);
+          setStatus("❌ Save canceled.");
+          incomingFile = null;
+        }
+      };
     }
+    // Do NOT send "ready" yet — wait for user to pick save location above
+    return;
   } else {
     addMsg(`<span class="muted">ℹ️ File will appear in Downloads panel after transfer.</span>`);
   }
 
   noSleepStart();
+
+  // ── RECEIVER STALL WATCHDOG ───────────────────────────────────────────────
+  // If no bytes arrive for 15s while the transfer is in progress, the sender
+  // has likely stalled or disconnected without sending a cancel message.
+  // Cancel cleanly so the UI doesn't hang in "Receiving..." forever.
+  const _recvWatchdogInterval = 5000;
+  const _recvStallLimit       = 15000;
+  let   _recvLastBytes        = 0;
+  let   _recvLastAdvance      = Date.now();
+  const _recvStallWatchdog    = setInterval(() => {
+    if (!incomingFile) { clearInterval(_recvStallWatchdog); return; }
+    if (incomingFile.finalizing || incomingFile.sawDone) { clearInterval(_recvStallWatchdog); return; }
+    const now = Date.now();
+    if (incomingFile.receivedBytes > _recvLastBytes) {
+      // Progress — reset timer
+      _recvLastBytes   = incomingFile.receivedBytes;
+      _recvLastAdvance = now;
+    } else if (now - _recvLastAdvance >= _recvStallLimit) {
+      clearInterval(_recvStallWatchdog);
+      dlog("[RECV] stall watchdog: no bytes for", _recvStallLimit / 1000, "s — canceling");
+      addMsg(`<span class="muted">⚠️ Transfer stalled (no data for 15s). Please retry.</span>`);
+      cancelTransfer("Transfer stalled", true, getDeviceName());
+    }
+  }, _recvWatchdogInterval);
+
   const primaryDc = window.dc;
   try { primaryDc?.send(JSON.stringify({ type: "ready" })); } catch {}
 }

@@ -104,6 +104,19 @@ io.on("connection", (socket) => {
     io.to(currentRoom).emit("chat-msg", { from: socket.id, name: deviceName, text });
   });
 
+  // ── TYPING INDICATORS ─────────────────────────────────────
+  socket.on("typing", ({ roomId, user }) => {
+    const room = roomId || currentRoom;
+    if (!room) return;
+    socket.to(room).emit("typing", { user: user || deviceName });
+  });
+
+  socket.on("stop-typing", ({ roomId } = {}) => {
+    const room = roomId || currentRoom;
+    if (!room) return;
+    socket.to(room).emit("stop-typing");
+  });
+
   // ── DISCONNECT ────────────────────────────────────────────
   socket.on("disconnect", () => {
     console.log(`[-] Disconnected: ${socket.id} (${deviceName})`);

@@ -22,6 +22,34 @@ const server = http.createServer(app);
 const io     = new Server(server, {
   cors: { origin: "*", methods: ["GET","POST"] },
   maxHttpBufferSize: 1e6,   // 1MB for signaling messages (SDP, ICE)
+
+  // ── FIX: Mobile file-picker / gallery disconnect ───────────────
+  // ROOT CAUSE: When Android/iOS opens the file picker, Chrome puts
+  // the tab into background and applies "Intensive Throttling" —
+  // all JS timers are frozen. The default pingTimeout (20 s) is too
+  // short; the client cannot reply to the server PING in time and
+  // Socket.IO declares the socket dead.
+  //
+  // OFFICIAL FIX (socket.io docs): increase pingTimeout on the server.
+  // Total tolerance window = pingInterval + pingTimeout = 25 + 60 = 85 s
+  // This covers even the slowest gallery app open time on Android.
+  //
+  // NOTE: Your Apache ProxyTimeout in the vhost MUST be > 85 s.
+  // Add this line inside your <VirtualHost> or <Location /socket.io/>:
+  //   ProxyTimeout 120
+  pingInterval:  25000,   // 25 s  (default: 25 000 — unchanged)
+  pingTimeout:   60000,   // 60 s  (default: 20 000 — TRIPLED ← key fix)
+  upgradeTimeout: 30000,  // 30 s  (default: 10 000 — safer on slow 4G)
+
+  // ── FIX: Built-in Connection State Recovery (Socket.IO v4.6+) ──
+  // If a brief disconnect still happens, this restores socket.id,
+  // socket.rooms, and socket.data automatically on reconnect —
+  // so the client rejoins its room without any extra code.
+  // maxDisconnectionDuration: 2 min grace window for mobile reconnect.
+  connectionStateRecovery: {
+    maxDisconnectionDuration: 2 * 60 * 1000, // 2 minutes
+    skipMiddlewares: true,
+  },
 });
 
 const PORT = process.env.PORT || 3000;
@@ -31,6 +59,13 @@ app.use(express.static(path.join(__dirname, "public")));
 
 // ── Room state ────────────────────────────────────────────────
 const rooms = new Map();   // roomId → Set of { socketId, deviceName }
+
+// ── Grace-period map ──────────────────────────────────────────
+// Backup for when connectionStateRecovery can't restore the session
+// (e.g. server restart, long disconnect). Stores last room info for
+// 90 seconds so the client can re-emit join-room and seamlessly
+// rejoin without the peer ever seeing them as "gone".
+const gracePending = new Map(); // socketId → { roomId, deviceName, timer }
 
 // ── Socket.IO events ──────────────────────────────────────────
 io.on("connection", (socket) => {
@@ -43,10 +78,51 @@ io.on("connection", (socket) => {
     if (!roomId) return;
     deviceName = name || socket.id.slice(0, 6);
 
+    // ── Recovered session fast-path ──────────────────────────
+    // If connectionStateRecovery succeeded, socket.recovered === true
+    // and socket.rooms is already restored — we just need to refresh
+    // the in-memory rooms Map entry so peers get the updated socket.id.
+    if (socket.recovered) {
+      console.log(`[Room ${roomId}] ${deviceName} session RECOVERED (no peer disruption)`);
+      // Update socketId in the room set to the new socket.id
+      const room = rooms.get(roomId);
+      if (room) {
+        room.forEach(p => { if (p.deviceName === deviceName) p.socketId = socket.id; });
+      }
+      // Cancel any pending grace timer for this device
+      gracePending.forEach((v, k) => {
+        if (v.roomId === roomId && v.deviceName === deviceName) {
+          clearTimeout(v.timer);
+          gracePending.delete(k);
+        }
+      });
+      socket.join(roomId);
+      currentRoom = roomId;
+      const users = rooms.get(roomId)?.size || 1;
+      io.to(roomId).emit("room-status", { room: roomId, users, joined: socket.id, deviceName });
+      const peers = [...(rooms.get(roomId) || [])]
+        .filter(p => p.socketId !== socket.id)
+        .map(p => ({ socketId: p.socketId, deviceName: p.deviceName }));
+      socket.emit("room-peers", peers);
+      return;
+    }
+
     // Leave previous room if any
     if (currentRoom) {
       leaveRoom(socket, currentRoom);
     }
+
+    // ── Cancel grace timer if this device is rejoining ───────
+    gracePending.forEach((v, k) => {
+      if (v.roomId === roomId && v.deviceName === deviceName) {
+        clearTimeout(v.timer);
+        gracePending.delete(k);
+        // Remove stale old entry from room set
+        const room = rooms.get(roomId);
+        if (room) room.forEach(p => { if (p.socketId === k) room.delete(p); });
+        console.log(`[Room ${roomId}] ${deviceName} rejoined within grace — connection restored`);
+      }
+    });
 
     currentRoom = roomId;
     socket.join(roomId);
@@ -118,12 +194,43 @@ io.on("connection", (socket) => {
   });
 
   // ── DISCONNECT ────────────────────────────────────────────
-  socket.on("disconnect", () => {
-    console.log(`[-] Disconnected: ${socket.id} (${deviceName})`);
-    if (currentRoom) leaveRoom(socket, currentRoom);
+  // FIX: Don't evict the peer instantly on disconnect.
+  //
+  // Why: Android/iOS opening the file picker suspends the tab.
+  // Socket.IO will briefly disconnect then auto-reconnect within
+  // seconds. If we evict immediately, the peer sees "user left"
+  // and WebRTC tears down — so we give a 90-second grace window.
+  //
+  // During grace: peer stays in the room. If they reconnect and
+  // re-emit join-room within 90 s, the grace timer is cancelled
+  // and everything is seamlessly restored with no UI disruption.
+  // After 90 s with no reconnect: they are truly evicted.
+  socket.on("disconnect", (reason) => {
+    console.log(`[-] Disconnected: ${socket.id} (${deviceName}) — reason: ${reason}`);
+    if (!currentRoom) return;
+
+    const savedRoom = currentRoom;
+    const savedName = deviceName;
+    currentRoom = null;
+
+    // Don't evict yet — start grace period
+    const GRACE_MS = 90_000; // 90 seconds
+    const timer = setTimeout(() => {
+      gracePending.delete(socket.id);
+      _leaveRoom(socket, savedRoom, savedName);
+      console.log(`[Room ${savedRoom}] ${savedName} — grace expired, evicted`);
+    }, GRACE_MS);
+
+    gracePending.set(socket.id, { roomId: savedRoom, deviceName: savedName, timer });
+    console.log(`[Room ${savedRoom}] ${savedName} — grace period started (${GRACE_MS/1000}s)`);
   });
 
   function leaveRoom(sock, roomId) {
+    _leaveRoom(sock, roomId, deviceName);
+    currentRoom = null;
+  }
+
+  function _leaveRoom(sock, roomId, name) {
     sock.leave(roomId);
     const room = rooms.get(roomId);
     if (room) {
@@ -131,10 +238,9 @@ io.on("connection", (socket) => {
       if (room.size === 0) {
         rooms.delete(roomId);
       } else {
-        io.to(roomId).emit("room-status", { room: roomId, users: room.size, left: sock.id });
+        io.to(roomId).emit("room-status", { room: roomId, users: room.size, left: sock.id, deviceName: name });
       }
     }
-    if (currentRoom === roomId) currentRoom = null;
   }
 });
 

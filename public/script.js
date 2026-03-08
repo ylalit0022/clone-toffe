@@ -1403,13 +1403,10 @@ socket.on("file-offer", ({ from, fromName, fromShort, meta }) => {
   pendingIncoming = { from, meta };
   try { const id = meta?.id || `${meta?.name}|${meta?.size}`; upsertRecvItem(id, meta?.name, meta?.size || 0, "pending", 0, meta?.size || 0); renderRecvQueueUI(); } catch {}
   const who = fromName || fromShort || (from ? from.substring(0, 5) : "User");
-  if (autoAcceptThisRoom) {
-    addMsg(`<span class="muted">✅ Auto-accepted from <b>${who}</b>: ${meta.name} (${fmtBytes(meta.size)})</span>`);
-    socket.emit("file-answer", { to: from, accepted: true });
-    _primaryPeerSocketId = from; pendingIncoming = null; modalBg.style.display = "none";
-    setStatus("Auto-accepted. Connecting P2P...");
-    return;
-  }
+  // BUG FIX 2: Always show the modal for every file offer.
+  // The previous autoAccept branch silently accepted file #2, #3 etc. without
+  // showing the modal — and without setting pendingWritable — so transfers
+  // would start with no save destination and appear to "not respond" on receiver.
   modalInfo.innerText = `From: ${who}\nFile: ${meta.name}\nSize: ${fmtBytes(meta.size)}\nType: ${meta.type}`;
   modalBg.style.display = "flex";
 });
@@ -1428,12 +1425,11 @@ acceptBtn.onclick = async () => {
   const canDisk = "showSaveFilePicker" in window && window.isSecureContext;
   let writable = null;
 
-  // Ask for save location for ALL files (not just large ones).
-  // Previously only files >300MB triggered showSaveFilePicker — small files
-  // used auto-download via a.click() which Android Chrome silently blocks
-  // unless it happens inside a direct user gesture on the same tick.
-  // Asking here (inside the onclick, which IS a user gesture) works on Android.
-  if (canDisk) {
+  // BUG FIX 1: Only ask for save location for LARGE files (>300MB).
+  // Small files use in-memory Blob + auto a.click() download — no dialog needed.
+  // Asking showSaveFilePicker for every file causes Android to open a second
+  // file picker overlay which confuses users and breaks the flow.
+  if (canDisk && meta.size > MEMORY_MAX_BYTES) {
     try {
       const handle = await window.showSaveFilePicker({ suggestedName: meta.name });
       writable = await handle.createWritable();
@@ -1443,19 +1439,20 @@ acceptBtn.onclick = async () => {
       socket.emit("file-answer", { to: pendingIncoming.from, accepted: false });
       pendingIncoming = null; modalBg.style.display = "none"; return;
     }
-  } else {
-    // Fallback for non-HTTPS or browsers without File System Access API —
-    // will use in-memory Blob + a.click() at the end (best effort on desktop).
-    if (meta.size > MEMORY_MAX_BYTES) {
-      addMsg(`<span class="muted">⚠️ Large file needs HTTPS for disk saving.</span>`);
-      socket.emit("file-answer", { to: pendingIncoming.from, accepted: false });
-      pendingIncoming = null; modalBg.style.display = "none"; return;
-    }
+  } else if (!canDisk && meta.size > MEMORY_MAX_BYTES) {
+    // Large file but no File System Access API (non-HTTPS or old browser)
+    addMsg(`<span class="muted">⚠️ Large file needs HTTPS for disk saving.</span>`);
+    socket.emit("file-answer", { to: pendingIncoming.from, accepted: false });
+    pendingIncoming = null; modalBg.style.display = "none"; return;
   }
+  // Small files: writable stays null → finalize will use Blob + a.click()
 
   pendingWritable = writable;
   socket.emit("file-answer", { to: pendingIncoming.from, accepted: true });
-  if (!autoAcceptThisRoom) { saveAutoAcceptFlag(true); addMsg(`<span class="muted">✅ Auto-accept enabled for this room</span>`); }
+  // BUG FIX 2: Do NOT set autoAcceptThisRoom here.
+  // Auto-accept was causing the second file offer to skip the modal entirely,
+  // meaning the receiver never saw the Accept button for file #2, #3, etc.
+  // Each file transfer must show the modal so the user can explicitly accept.
   _primaryPeerSocketId = pendingIncoming.from;
   pendingIncoming = null; modalBg.style.display = "none";
   setStatus("Accepted. Connecting P2P...");

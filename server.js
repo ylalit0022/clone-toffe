@@ -193,6 +193,21 @@ io.on("connection", (socket) => {
     socket.to(room).emit("stop-typing");
   });
 
+  // ── KEEPALIVE ─────────────────────────────────────────────
+  // Client emits this just before opening the file picker on mobile.
+  // Receiving it proves the socket is alive — if there is a pending
+  // grace timer for this socket we cancel it so the peer is not evicted.
+  socket.on("keepalive", () => {
+    console.log(`[Keepalive] ${deviceName} (${socket.id.slice(0,6)})`);
+    // Cancel any pending grace eviction for this socket
+    if (gracePending.has(socket.id)) {
+      const entry = gracePending.get(socket.id);
+      clearTimeout(entry.timer);
+      gracePending.delete(socket.id);
+      console.log(`[Keepalive] Grace timer cancelled for ${deviceName}`);
+    }
+  });
+
   // ── DISCONNECT ────────────────────────────────────────────
   // FIX: Don't evict the peer instantly on disconnect.
   //

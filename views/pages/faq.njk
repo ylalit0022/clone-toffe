@@ -1,0 +1,157 @@
+{% extends "../layouts/base.njk" %}
+
+{% block title %}FAQ – Tranzo File Transfer Questions Answered{% endblock %}
+{% block metaDesc %}Frequently asked questions about Tranzo's free P2P file transfer. Learn about file size limits, browser support, speed, privacy, and more.{% endblock %}
+{% block canonical %}<link rel="canonical" href="https://share.rumnnlg.com/faq" />{% endblock %}
+{% block ogTitle %}FAQ – Tranzo File Transfer Questions Answered{% endblock %}
+{% block ogUrl %}https://share.rumnnlg.com/faq{% endblock %}
+
+{% block adTop %}
+<div class="container-lg pt-3">
+  <div class="ad-slot ad-slot-leaderboard">
+    <iframe src="about:blank" title="Advertisement" aria-label="Advertisement" scrolling="no"></iframe>
+  </div>
+</div>
+{% endblock %}
+
+{% block content %}
+<main class="content-page">
+  <div class="container-lg">
+    <div class="row justify-content-center">
+      <div class="col-12 col-lg-8">
+
+        <div class="page-eyebrow">&#10067; FAQ</div>
+        <h1>Frequently Asked <span class="grad">Questions</span></h1>
+        <p class="lead">Everything you need to know about sending files with Tranzo.</p>
+
+        <div class="ad-slot ad-slot-rect mb-4">
+          <iframe src="about:blank" title="Advertisement" aria-label="Advertisement" scrolling="no"></iframe>
+        </div>
+
+        <div id="faqList">
+
+          <div class="faq-item">
+            <button class="faq-q" onclick="toggleFaq(this)">
+              Is there a file size limit?
+              <span class="faq-icon">+</span>
+            </button>
+            <div class="faq-a">
+              <p>No. Tranzo has no file size limit. Files are streamed in 64 KB chunks directly between browsers. For files larger than 300 MB, Tranzo uses the File System Access API to write chunks directly to disk, so you won't run out of browser memory.</p>
+            </div>
+          </div>
+
+          <div class="faq-item">
+            <button class="faq-q" onclick="toggleFaq(this)">
+              Does the sender have to stay online until the transfer finishes?
+              <span class="faq-icon">+</span>
+            </button>
+            <div class="faq-a">
+              <p>Yes. Unlike cloud-based services, Tranzo is a live peer-to-peer connection. Both devices must stay online for the duration of the transfer. If the connection drops, you can pause and resume in most cases.</p>
+            </div>
+          </div>
+
+          <div class="faq-item">
+            <button class="faq-q" onclick="toggleFaq(this)">
+              Which browsers are supported?
+              <span class="faq-icon">+</span>
+            </button>
+            <div class="faq-a">
+              <p>Any modern browser with WebRTC support works: Chrome 80+, Firefox 75+, Edge 80+, Safari 13+, and their mobile equivalents. Internet Explorer is not supported. For the best experience on Android, use Chrome.</p>
+            </div>
+          </div>
+
+          <div class="faq-item">
+            <button class="faq-q" onclick="toggleFaq(this)">
+              How fast is the transfer?
+              <span class="faq-icon">+</span>
+            </button>
+            <div class="faq-a">
+              <p>On the same Wi-Fi network, transfers typically run at 30–100 MB/s (limited by CPU and browser overhead). Over the internet, speed depends on both devices' upload/download bandwidth. There is no artificial cap on Tranzo's side.</p>
+            </div>
+          </div>
+
+          <div class="faq-item">
+            <button class="faq-q" onclick="toggleFaq(this)">
+              Can I send files from Android to PC?
+              <span class="faq-icon">+</span>
+            </button>
+            <div class="faq-a">
+              <p>Yes. Open Tranzo in Chrome on your Android, create or join a room, then open the same room on your PC browser. Files transfer directly between them. See our <a href="/android-to-pc-file-transfer">Android to PC guide</a> for step-by-step instructions.</p>
+            </div>
+          </div>
+
+          <div class="faq-item">
+            <button class="faq-q" onclick="toggleFaq(this)">
+              Are my files encrypted?
+              <span class="faq-icon">+</span>
+            </button>
+            <div class="faq-a">
+              <p>Yes. WebRTC uses DTLS 1.2/1.3 encryption for all peer connections by default — the browser enforces this, not us. Your files are encrypted in transit and our server never sees them. See the <a href="/security">Security page</a> for full details.</p>
+            </div>
+          </div>
+
+          <div class="faq-item">
+            <button class="faq-q" onclick="toggleFaq(this)">
+              Do I need to create an account?
+              <span class="faq-icon">+</span>
+            </button>
+            <div class="faq-a">
+              <p>No. Tranzo requires zero sign-up. Just open the site, create a room, share the link or QR code, and start sending files instantly.</p>
+            </div>
+          </div>
+
+          <div class="faq-item">
+            <button class="faq-q" onclick="toggleFaq(this)">
+              Can multiple people join the same room?
+              <span class="faq-icon">+</span>
+            </button>
+            <div class="faq-a">
+              <p>Yes. Multiple people can join the same room. Each person who accepts a file offer receives the file independently. The sender can see a live scoreboard showing who accepted, rejected, or is still waiting.</p>
+            </div>
+          </div>
+
+          <div class="faq-item">
+            <button class="faq-q" onclick="toggleFaq(this)">
+              What if the transfer fails?
+              <span class="faq-icon">+</span>
+            </button>
+            <div class="faq-a">
+              <p>Transfers can fail if the peer connection drops (e.g. network change) or if one device goes to sleep. On mobile, Tranzo includes a 90-second grace period for reconnection after the file picker is opened. If a transfer fails, just re-offer the file — the receiver will see a new Accept modal.</p>
+            </div>
+          </div>
+
+          <div class="faq-item">
+            <button class="faq-q" onclick="toggleFaq(this)">
+              Is Tranzo free?
+              <span class="faq-icon">+</span>
+            </button>
+            <div class="faq-a">
+              <p>Yes, completely free. We support the service through non-intrusive advertising. There are no premium tiers, no throttling, and no hidden fees.</p>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- Mid-page ad -->
+        <div class="ad-slot ad-slot-banner my-4">
+          <iframe src="about:blank" title="Advertisement" aria-label="Advertisement" scrolling="no"></iframe>
+        </div>
+
+        <p class="mt-4">Still have a question? <a href="/contact">Contact us</a> and we'll get back to you.</p>
+
+      </div>
+    </div>
+  </div>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function toggleFaq(btn) {
+  var item = btn.closest('.faq-item');
+  var isOpen = item.classList.contains('open');
+  document.querySelectorAll('.faq-item.open').forEach(function(el) { el.classList.remove('open'); });
+  if (!isOpen) item.classList.add('open');
+}
+</script>
+{% endblock %}

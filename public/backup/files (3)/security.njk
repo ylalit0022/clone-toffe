@@ -1,0 +1,102 @@
+{% extends "../layouts/base.njk" %}
+
+{% block title %}Security – How Tranzo Protects Your Files{% endblock %}
+{% block metaDesc %}Tranzo uses WebRTC DTLS encryption, zero server storage, and peer-to-peer architecture to keep your file transfers 100% private and secure.{% endblock %}
+{% block canonical %}<link rel="canonical" href="https://share.rumnnlg.com/security" />{% endblock %}
+{% block ogTitle %}Security – How Tranzo Protects Your Files{% endblock %}
+{% block ogUrl %}https://share.rumnnlg.com/security{% endblock %}
+
+{% block adTop %}
+<div class="container-lg pt-3">
+  <div class="ad-slot ad-slot-leaderboard">
+    <iframe src="about:blank" title="Advertisement" aria-label="Advertisement" scrolling="no"></iframe>
+  </div>
+</div>
+{% endblock %}
+
+{% block content %}
+<main class="content-page">
+  <div class="container-lg">
+    <div class="row justify-content-center">
+      <div class="col-12 col-lg-8">
+
+        <div class="page-eyebrow">&#128274; Privacy First</div>
+        <h1>Your Files are <span class="grad">Secure</span></h1>
+        <p class="lead">Every transfer on Tranzo is encrypted end-to-end by default, and files never touch our servers. Here's exactly how we protect your data.</p>
+
+        <div class="ad-slot ad-slot-rect mb-4">
+          <iframe src="about:blank" title="Advertisement" aria-label="Advertisement" scrolling="no"></iframe>
+        </div>
+
+        <h2>Encryption</h2>
+        <div class="info-card">
+          <h3 style="margin-top:0;">DTLS 1.2 / 1.3 — Transport Layer Security</h3>
+          <p>WebRTC mandates DTLS (Datagram TLS) for all peer connections. This is the same family of protocols as HTTPS. Every byte of your file is encrypted before it leaves your device and decrypted only by the recipient's browser.</p>
+        </div>
+        <div class="info-card">
+          <h3 style="margin-top:0;">SRTP — Secure Real-Time Transport</h3>
+          <p>The WebRTC DataChannel layer uses SRTP which provides message authentication and replay protection on top of DTLS. Tampering with data in transit is cryptographically detectable.</p>
+        </div>
+
+        <h2>Zero Server Storage</h2>
+        <p>Tranzo's signaling server exchanges only two things between peers:</p>
+        <ul>
+          <li><strong>SDP (Session Description Protocol)</strong> — describes codec and connection capabilities. Contains zero file data.</li>
+          <li><strong>ICE Candidates</strong> — lists of IP addresses and ports for NAT traversal. Contains zero file data.</li>
+        </ul>
+        <p>Once the peer connection is established the signaling server receives nothing further. Your files travel directly peer-to-peer.</p>
+
+        <!-- Mid-page ad -->
+        <div class="ad-slot ad-slot-banner my-4">
+          <iframe src="about:blank" title="Advertisement" aria-label="Advertisement" scrolling="no"></iframe>
+        </div>
+
+        <h2>TURN Server (Relay Fallback)</h2>
+        <p>When two devices are behind strict NATs (common on mobile networks), a direct connection can't be established. In this case, a TURN relay is used as a fallback. The TURN server relays encrypted packets but <strong>cannot decrypt them</strong> — it only sees ciphertext, never plaintext file content.</p>
+
+        <h2>Room Security</h2>
+        <div class="row g-3 my-1">
+          <div class="col-12 col-sm-6">
+            <div class="info-card h-100">
+              <h3 style="margin-top:0;">&#128273; Room IDs</h3>
+              <p class="mb-0">Room IDs are ephemeral — they exist only for the duration of a session. There is no permanent storage of rooms or their contents.</p>
+            </div>
+          </div>
+          <div class="col-12 col-sm-6">
+            <div class="info-card h-100">
+              <h3 style="margin-top:0;">&#9201; Short-Lived Links</h3>
+              <p class="mb-0">Share links expire the moment you leave the room. Old links cannot be rejoined — a new room must be created.</p>
+            </div>
+          </div>
+          <div class="col-12 col-sm-6">
+            <div class="info-card h-100">
+              <h3 style="margin-top:0;">&#128083; Rate Limiting</h3>
+              <p class="mb-0">File offers are rate-limited server-side (max 5 per minute per socket) to prevent abuse from malicious clients.</p>
+            </div>
+          </div>
+          <div class="col-12 col-sm-6">
+            <div class="info-card h-100">
+              <h3 style="margin-top:0;">&#128064; Accept / Reject Modal</h3>
+              <p class="mb-0">Receivers always see an Accept/Reject modal before a file transfer begins. Nothing is downloaded without explicit consent.</p>
+            </div>
+          </div>
+        </div>
+
+        <h2>What We Don't Do</h2>
+        <ul>
+          <li>We do <strong>not</strong> log file names, file sizes, or file types</li>
+          <li>We do <strong>not</strong> store any file content anywhere</li>
+          <li>We do <strong>not</strong> sell or share any user data</li>
+          <li>We do <strong>not</strong> require account creation or email addresses</li>
+        </ul>
+
+        <div class="d-flex gap-3 mt-4">
+          <a href="/" class="btn-em" style="text-decoration:none;">Send Files Securely &#9889;</a>
+          <a href="/privacy" class="btn-ghost" style="text-decoration:none;">Privacy Policy</a>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</main>
+{% endblock %}

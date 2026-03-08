@@ -1,0 +1,127 @@
+{% extends "../layouts/base.njk" %}
+
+{% block title %}Contact Tranzo – Get In Touch{% endblock %}
+{% block metaDesc %}Have a question, bug report, or feedback for Tranzo? Get in touch with our team. We read every message.{% endblock %}
+{% block canonical %}<link rel="canonical" href="https://share.rumnnlg.com/contact" />{% endblock %}
+{% block ogTitle %}Contact Tranzo – Get In Touch{% endblock %}
+{% block ogUrl %}https://share.rumnnlg.com/contact{% endblock %}
+
+{% block adTop %}
+<div class="container-lg pt-3">
+  <div class="ad-slot ad-slot-leaderboard">
+    <iframe src="about:blank" title="Advertisement" aria-label="Advertisement" scrolling="no"></iframe>
+  </div>
+</div>
+{% endblock %}
+
+{% block content %}
+<main class="content-page">
+  <div class="container-lg">
+    <div class="row justify-content-center">
+      <div class="col-12 col-lg-8">
+
+        <div class="page-eyebrow">&#128172; Say Hello</div>
+        <h1>Contact <span class="grad">Us</span></h1>
+        <p class="lead">We read every message. Whether it's a bug, a feature idea, or just feedback — we'd love to hear from you.</p>
+
+        <div class="row g-4">
+          <div class="col-12 col-md-6">
+            <div class="g-card strip-em h-100">
+              <div class="g-card-body">
+                <h2 style="margin-top:0;font-size:1.1rem;">&#128030; Found a Bug?</h2>
+                <p style="font-size:14px;">Please open an issue on our GitHub repository with steps to reproduce. We triage issues every week.</p>
+                <a href="https://github.com/ylalit0022/clone-toffe/issues" target="_blank" rel="noopener" class="btn-ghost" style="text-decoration:none;font-size:13px;padding:8px 16px;">Open GitHub Issue</a>
+              </div>
+            </div>
+          </div>
+          <div class="col-12 col-md-6">
+            <div class="g-card strip-amb h-100">
+              <div class="g-card-body">
+                <h2 style="margin-top:0;font-size:1.1rem;">&#128161; Feature Request?</h2>
+                <p style="font-size:14px;">Want a feature that doesn't exist yet? Start a discussion on GitHub or use the form below.</p>
+                <a href="https://github.com/ylalit0022/clone-toffe/discussions" target="_blank" rel="noopener" class="btn-ghost" style="text-decoration:none;font-size:13px;padding:8px 16px;">Start Discussion</a>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Ad between cards and form -->
+        <div class="ad-slot ad-slot-banner my-4">
+          <iframe src="about:blank" title="Advertisement" aria-label="Advertisement" scrolling="no"></iframe>
+        </div>
+
+        <h2>Send a Message</h2>
+        <p style="font-size:14px;color:var(--muted);">For general enquiries, privacy concerns, or partnership requests, use this form.</p>
+
+        <div class="g-card">
+          <div class="g-card-body">
+            <div id="contactForm">
+              <div class="mb-3">
+                <label class="field-label" for="cf-name">Your Name</label>
+                <input class="g-input" type="text" id="cf-name" placeholder="e.g. Priya Sharma" autocomplete="name" />
+              </div>
+              <div class="mb-3">
+                <label class="field-label" for="cf-email">Email Address</label>
+                <input class="g-input" type="email" id="cf-email" placeholder="you@example.com" autocomplete="email" />
+              </div>
+              <div class="mb-3">
+                <label class="field-label" for="cf-subject">Subject</label>
+                <select class="g-input" id="cf-subject" style="cursor:pointer;">
+                  <option value="">Select a topic…</option>
+                  <option value="bug">Bug Report</option>
+                  <option value="feature">Feature Request</option>
+                  <option value="privacy">Privacy / Data Request</option>
+                  <option value="business">Business / Partnership</option>
+                  <option value="other">Other</option>
+                </select>
+              </div>
+              <div class="mb-3">
+                <label class="field-label" for="cf-message">Message</label>
+                <textarea class="g-input" id="cf-message" rows="5" placeholder="Describe your question or feedback…" style="resize:vertical;height:auto;"></textarea>
+              </div>
+              <button class="btn-em" onclick="submitContact()">Send Message &#8594;</button>
+              <div id="cf-result" style="margin-top:12px;font-size:14px;display:none;"></div>
+            </div>
+          </div>
+        </div>
+
+        <p class="mt-4" style="font-size:13px;color:var(--muted2);">We typically reply within 2 business days. For urgent security issues, please note "SECURITY" in your subject line.</p>
+
+      </div>
+    </div>
+  </div>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function submitContact() {
+  var name    = document.getElementById('cf-name').value.trim();
+  var email   = document.getElementById('cf-email').value.trim();
+  var subject = document.getElementById('cf-subject').value;
+  var message = document.getElementById('cf-message').value.trim();
+  var result  = document.getElementById('cf-result');
+
+  if (!name || !email || !subject || !message) {
+    result.style.display = 'block';
+    result.style.color   = 'var(--rose)';
+    result.textContent   = '&#10060; Please fill in all fields.';
+    return;
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    result.style.display = 'block';
+    result.style.color   = 'var(--rose)';
+    result.textContent   = 'Please enter a valid email address.';
+    return;
+  }
+  /* ── TODO: wire up to your backend endpoint or Formspree ── */
+  result.style.display = 'block';
+  result.style.color   = 'var(--em)';
+  result.innerHTML     = '&#10003; Thanks, ' + name + '! Your message has been received. We\'ll be in touch soon.';
+  document.getElementById('cf-name').value    = '';
+  document.getElementById('cf-email').value   = '';
+  document.getElementById('cf-subject').value = '';
+  document.getElementById('cf-message').value = '';
+}
+</script>
+{% endblock %}

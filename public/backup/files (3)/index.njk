@@ -1,0 +1,762 @@
+{% extends "../layouts/base.njk" %}
+
+{% block title %}Tranzo – Free P2P File Transfer, No Upload, No Limits{% endblock %}
+{% block metaDesc %}Transfer files directly between devices for free using WebRTC. No cloud, no signup, no size limits. 100% private P2P file sharing.{% endblock %}
+{% block canonical %}<link rel="canonical" href="https://share.rumnnlg.com/" />{% endblock %}
+{% block ogTitle %}Tranzo – Free P2P File Transfer{% endblock %}
+{% block ogUrl %}https://share.rumnnlg.com/{% endblock %}
+
+{# ── INDEX overrides the navbar block with the connection-pill nav ── #}
+{% block navbar %}
+<nav class="nav-bar">
+  <div class="container-lg">
+    <div class="nav-inner">
+
+      <a href="/" class="nav-logo">
+        <span class="nav-logo-icon">&#9889;</span>
+        Tran<span class="dot">zo</span>
+      </a>
+
+      <div class="nav-right">
+        <!-- Status pill: show dot+text on sm+, dot-only on xs via CSS above -->
+        <div class="conn-pill">
+          <span class="conn-dot" id="connDot"></span>
+          <span id="status">Not Connected</span>
+        </div>
+        <!-- P2P badge: hidden on xs -->
+        <span class="nav-badge d-none d-sm-inline-block">P2P</span>
+      </div>
+
+    </div>
+  </div>
+</nav>
+{% endblock %}
+
+{# ── INDEX overrides the footer with the simple original footer ── #}
+{% block footer %}
+<footer class="page-footer py-4">
+  <div class="container-lg">
+    <div class="row align-items-center gy-3">
+      <div class="col-12 col-sm-auto">
+        <div class="d-flex align-items-center gap-2">
+          <div class="footer-icon">&#9889;</div>
+          <div>
+            <div class="footer-name">Tranzo</div>
+            <div class="footer-tag">Files never touch our servers.</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-12 col-sm">
+        <div class="footer-links d-flex flex-wrap gap-3 justify-content-sm-end justify-content-center align-items-center">
+          <a href="/privacy">Privacy</a>
+          <a href="/about">About</a>
+          <a href="/how-it-works">How It Works</a>
+          <a href="/faq">FAQ</a>
+          <span style="color:var(--muted);font-size:13px;font-weight:500;">WebRTC &middot; E2E Encrypted</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</footer>
+{% endblock %}
+
+{% block content %}
+  <section class="hero" id="heroSection">
+    <div class="container-lg">
+      <div class="row justify-content-center">
+        <div class="col-12 col-md-10 col-lg-8 col-xl-7">
+
+          <div class="hero-eyebrow">&#128274; WebRTC &middot; End-to-End Encrypted</div>
+
+          <h1>Transfer Files <span class="grad">Instantly.</span><br class="d-none d-sm-block">Zero Cloud. Zero Trace.</h1>
+
+          <p class="hero-sub">Your files fly directly between browsers via WebRTC &mdash; no server ever sees them. 100% free, no signup, no limits.</p>
+
+          <div class="trust-badges">
+            <span class="trust-badge">&#9889; Direct P2P</span>
+            <span class="trust-badge">&#128737; Zero Storage</span>
+            <span class="trust-badge">&#128515; Always Free</span>
+            <span class="trust-badge">&#128241; Any Device</span>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================================================
+       APP
+  ================================================ -->
+  <main class="flex-grow-1">
+    <div class="container-lg">
+      <div class="row justify-content-center">
+        <div class="col-12 col-md-10 col-lg-8 col-xl-7 pb-5">
+
+          <!-- CONNECTION CARD — always visible -->
+          <div class="g-card strip-em">
+            <div class="g-card-body">
+              <div class="section-label">Connect to a Room</div>
+
+              <div class="row g-3 align-items-end">
+                <!-- Device name -->
+                <div class="col-12 col-sm-6 col-md-5">
+                  <label class="field-label" for="deviceName">Your Name</label>
+                  <input class="g-input" type="text" id="deviceName"
+                    placeholder="e.g. Laptop Chrome" autocomplete="off" />
+                </div>
+                <!-- Room ID -->
+                <div class="col-12 col-sm-6 col-md-4">
+                  <label class="field-label" for="roomId">Room ID</label>
+                  <input class="g-input" type="text" id="roomId"
+                    placeholder="e.g. forest-42" autocomplete="off" />
+                </div>
+                <!-- Buttons: always side by side -->
+                <div class="col-12 col-md-3">
+                  <div class="d-flex gap-2">
+                    <button class="btn-ghost w-100" id="createBtn">Create</button>
+                    <button class="btn-em w-100"    id="joinBtn">Join &rarr;</button>
+                  </div>
+                  <!-- Live camera QR scanner -->
+                  <div style="margin-top:8px;text-align:center;">
+                    <button onclick="openQrScanner()" style="background:none;border:none;padding:0;font-size:12px;color:var(--em);font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:5px;">
+                      <span>&#128247;</span><span>Scan QR to join</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div id="roomHint"></div>
+            </div>
+          </div>
+
+          <!-- ROOM MEMBERS PANEL — controlled by multiroom.js -->
+          <div class="reveal-panel" id="membersPanel">
+            <div class="g-card" id="roomMembersCard">
+              <div class="g-card-body">
+                <div class="section-label">&#128101; Room Members</div>
+                <div id="membersList"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- FILE ACCEPT SCOREBOARD — controlled by multiroom.js -->
+          <div class="reveal-panel" id="scorePanel">
+            <div class="g-card" id="fileScoreCard">
+              <div class="g-card-body">
+                <div class="section-label">&#128202; Transfer Status</div>
+                <div id="fileScoreList"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- SHARE LINK PANEL -->
+          <div class="reveal-panel" id="shareLinkPanel">
+            <div class="g-card" id="shareLinkCard">
+              <div class="g-card-body">
+
+                <div class="d-flex align-items-start align-items-sm-center gap-3 mb-3">
+                  <div class="link-icon-wrap">&#128279;</div>
+                  <div>
+                    <div class="link-title">Invite via Link</div>
+                    <div class="link-sub">Share this link &mdash; anyone who opens it joins your room instantly</div>
+                  </div>
+                </div>
+
+                <!-- Input + copy button: always inline, wraps gracefully -->
+                <div class="d-flex align-items-stretch">
+                  <input type="text" id="shareLinkInput" readonly placeholder="Generating link&hellip;" />
+                  <button class="btn-em btn-sm-custom copy-attached flex-shrink-0" id="copyLinkBtn">&#128203; Copy</button>
+                </div>
+
+                <!-- QR code — shown automatically, with share + download actions -->
+                <div id="qrSection" style="margin-top:14px;">
+                  <!-- QR canvas renders here -->
+                  <div id="qrWrap" style="display:none;">
+                    <div style="display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap;">
+                      <!-- QR image -->
+                      <div id="qrCanvas" style="display:inline-block;border-radius:12px;border:1px solid var(--border);padding:10px;background:#fff;flex-shrink:0;"></div>
+                      <!-- Action buttons stacked beside QR -->
+                      <div style="display:flex;flex-direction:column;gap:8px;justify-content:center;min-width:120px;">
+                        <button id="qrDownloadBtn" onclick="downloadQr()" class="btn-ghost btn-sm-custom" style="font-size:12px;display:flex;align-items:center;gap:6px;">
+                          &#11015; Save QR
+                        </button>
+                        <button id="qrShareBtn" onclick="shareQr()" class="btn-em btn-sm-custom" style="font-size:12px;display:flex;align-items:center;gap:6px;">
+                          &#8599; Share
+                        </button>
+                        <button id="qrWhatsappBtn" onclick="shareWhatsapp()" style="background:#25D366;color:#fff;border:none;border-radius:var(--rXs);font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:12px;padding:8px 14px;cursor:pointer;display:flex;align-items:center;gap:6px;">
+                          &#128172; WhatsApp
+                        </button>
+                      </div>
+                    </div>
+                    <p style="font-size:12px;color:var(--muted);margin-top:8px;margin-bottom:0;">&#128241; Point phone camera at this code to join instantly</p>
+                  </div>
+                </div>
+
+                <div id="shareLinkHint" class="mt-2"
+                  style="font-size:13px;color:var(--success);font-weight:600;display:none;">
+                  &#10003; Copied to clipboard!
+                </div>
+                <p class="mt-2 mb-0" style="font-size:13px;color:var(--muted);">&#8987; Expires when you leave the room</p>
+
+              </div>
+            </div>
+          </div>
+
+          <!-- CHAT PANEL -->
+          <div class="reveal-panel" id="chatPanel">
+            <div class="g-card" id="chatSection">
+              <div class="g-card-body">
+                <div class="section-label">Live Chat</div>
+                <div id="chatBox"></div>
+                <!-- Input row: input grows, button stays right -->
+                <div class="d-flex gap-2 mt-3">
+                  <input class="g-input flex-grow-1" type="text" id="messageInput"
+                    placeholder="Say something&hellip;" />
+                  <button class="btn-amb btn-sm-custom flex-shrink-0" id="sendBtn">Send &#8593;</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- FILE TRANSFER PANEL -->
+          <div class="reveal-panel" id="filePanel">
+            <div class="g-card strip-amb">
+              <div class="g-card-body">
+                <div class="section-label">Send Files</div>
+
+                <!-- Drop zone -->
+                <div class="drop-zone" id="dropZone">
+                  <input type="file" id="fileInput" multiple />
+                  <div class="drop-icon-wrap">
+                    <span class="drop-icon" style="margin:0;">&#128194;</span>
+                  </div>
+                  <div class="drop-title">Drop files here, or click to browse</div>
+                  <div class="drop-sub">Any type &middot; No size cap &middot; P2P &middot; Never stored</div>
+                  <div class="dz-divider">or browse</div>
+                </div>
+
+                <div class="g-divider"></div>
+
+                <!-- Status -->
+                <div id="fileStatus" class="mb-3">
+                  <span style="color:var(--muted2);font-size:13px;">&#9679;</span> Idle
+                </div>
+
+                <!-- Progress bar -->
+                <div class="progress-rail mb-1">
+                  <div class="progress-fill" id="progressFill"></div>
+                </div>
+                <progress id="progressBar" value="0" max="100"></progress>
+
+                <!-- Stats + controls: wrap on mobile, align right on sm+ -->
+                <div class="row g-2 align-items-center mt-3">
+                  <!-- Stat pills: wrap on xs -->
+                  <div class="col-12 col-sm">
+                    <div class="d-flex flex-wrap gap-2">
+                      <div class="stat-pill">Progress <b id="progressText">0%</b></div>
+                      <div id="speedText" class="stat-pill">Speed <b>0 MB/s</b></div>
+                      <div id="etaText"   class="stat-pill">ETA <b>--</b></div>
+                    </div>
+                  </div>
+                  <!-- Control buttons: full-width on xs, auto on sm+ -->
+                  <div class="col-12 col-sm-auto">
+                    <div class="d-flex flex-wrap gap-2">
+                      <button class="btn-ghost btn-sm-custom flex-fill flex-sm-grow-0"
+                        id="pauseBtn"  disabled>&#9208; Pause</button>
+                      <button class="btn-em    btn-sm-custom flex-fill flex-sm-grow-0"
+                        id="resumeBtn" disabled>&#9654; Resume</button>
+                      <button class="btn-danger btn-sm-custom flex-fill flex-sm-grow-0"
+                        id="cancelBtn" disabled>&#10005; Cancel</button>
+                    </div>
+                  </div>
+                </div>
+
+              </div>
+            </div>
+          </div>
+          <!-- /filePanel -->
+
+        </div><!-- /col -->
+      </div><!-- /row -->
+    </div><!-- /container -->
+  </main>
+{% endblock %}
+
+{% block scripts %}
+<!-- QR SCANNER MODAL — live camera, like GPay/PhonePe -->
+<div id="qrScanModal" style="display:none;position:fixed;inset:0;background:rgba(17,24,39,.85);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);z-index:1060;align-items:center;justify-content:center;padding:16px;">
+  <div style="background:#fff;border-radius:20px;width:min(380px,100%);overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.3);position:relative;">
+    <!-- Header -->
+    <div style="padding:18px 20px 12px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);">
+      <div>
+        <div style="font-family:'Bricolage Grotesque',sans-serif;font-weight:800;font-size:16px;">&#128247; Scan QR Code</div>
+        <div style="font-size:12px;color:var(--muted);margin-top:2px;">Point camera at the room QR code</div>
+      </div>
+      <button onclick="closeQrScanner()" style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 10px;cursor:pointer;font-size:16px;line-height:1;">&#10005;</button>
+    </div>
+    <!-- Viewfinder -->
+    <div style="position:relative;background:#000;aspect-ratio:1/1;overflow:hidden;">
+      <video id="qrVideo" autoplay playsinline muted style="width:100%;height:100%;object-fit:cover;display:block;"></video>
+      <!-- Scanning overlay -->
+      <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;">
+        <div id="qrScanFrame" style="width:65%;aspect-ratio:1/1;position:relative;">
+          <!-- Corner brackets -->
+          <div style="position:absolute;top:0;left:0;width:22px;height:22px;border-top:3px solid #fff;border-left:3px solid #fff;border-radius:4px 0 0 0;"></div>
+          <div style="position:absolute;top:0;right:0;width:22px;height:22px;border-top:3px solid #fff;border-right:3px solid #fff;border-radius:0 4px 0 0;"></div>
+          <div style="position:absolute;bottom:0;left:0;width:22px;height:22px;border-bottom:3px solid #fff;border-left:3px solid #fff;border-radius:0 0 0 4px;"></div>
+          <div style="position:absolute;bottom:0;right:0;width:22px;height:22px;border-bottom:3px solid #fff;border-right:3px solid #fff;border-radius:0 0 4px 0;"></div>
+          <!-- Scan line animation -->
+          <div id="qrScanLine" style="position:absolute;left:4px;right:4px;height:2px;background:linear-gradient(90deg,transparent,var(--em),transparent);animation:qrScan 2s ease-in-out infinite;top:0;"></div>
+        </div>
+      </div>
+      <!-- Status message -->
+      <div id="qrScanStatus" style="position:absolute;bottom:0;left:0;right:0;background:linear-gradient(transparent,rgba(0,0,0,.7));padding:20px 16px 12px;color:#fff;font-size:13px;font-weight:600;text-align:center;">Scanning…</div>
+    </div>
+    <!-- Fallback: upload image -->
+    <div style="padding:14px 20px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:10px;">
+      <span style="font-size:12px;color:var(--muted);">Can't use camera?</span>
+      <label style="font-size:12px;color:var(--em);font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:5px;white-space:nowrap;">
+        &#128247; Upload QR image
+        <input type="file" accept="image/*" style="display:none;" onchange="handleQrImageUpload(this)" />
+      </label>
+    </div>
+  </div>
+</div>
+<style>
+@keyframes qrScan {
+  0%   { top: 4px;   opacity: 1; }
+  50%  { top: calc(100% - 6px); opacity: 1; }
+  100% { top: 4px;   opacity: 1; }
+}
+</style>
+
+<!-- INCOMING FILE MODAL -->
+<div id="modalBg">
+  <div id="modal">
+    <h3 class="h5">&#128229; Incoming File</h3>
+    <pre id="modalInfo"></pre>
+    <div class="d-flex flex-column flex-sm-row justify-content-sm-end gap-2 mt-3">
+      <button class="btn-danger w-100 w-sm-auto" id="rejectBtn">Reject</button>
+      <button class="btn-em    w-100 w-sm-auto" id="acceptBtn">Accept &amp; Save &rarr;</button>
+    </div>
+  </div>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+
+<!-- BRIDGE 1: native progress.value -> visual fill bar -->
+<script>
+(function(){
+  var native = document.getElementById('progressBar');
+  var fill   = document.getElementById('progressFill');
+  if (!native || !fill) return;
+  var proto = HTMLProgressElement.prototype;
+  var desc  = Object.getOwnPropertyDescriptor(proto, 'value');
+  Object.defineProperty(native, 'value', {
+    get: function()  { return desc.get.call(this); },
+    set: function(v) {
+      desc.set.call(this, v);
+      fill.style.width = ((v / this.max) * 100) + '%';
+    }
+  });
+})();
+</script>
+
+<!-- BRIDGE 2: drop zone drag highlight -->
+<script>
+(function(){
+  var dz = document.getElementById('dropZone');
+  if (!dz) return;
+  ['dragenter','dragover'].forEach(function(ev) {
+    dz.addEventListener(ev, function(e) { e.preventDefault(); dz.classList.add('dragover'); });
+  });
+  ['dragleave','drop'].forEach(function(ev) {
+    dz.addEventListener(ev, function() { dz.classList.remove('dragover'); });
+  });
+})();
+</script>
+
+<!--
+  BRIDGE 3: Progressive Reveal Interceptor
+
+  script.js sets element.style.display = 'block'|'none'
+  on #shareLinkCard and #chatSection.
+
+  We Proxy .style so those writes toggle .is-visible on the
+  parent .reveal-panel -> smooth CSS max-height transition.
+
+  filePanel revealed by EITHER shareLinkCard (sender)
+  OR chatSection (receiver) — both sides get the file panel.
+
+  script.js NOT modified. All IDs intact. SEO safe.
+-->
+<script>
+(function() {
+
+  function interceptDisplay(el, panel, onShow, onHide) {
+    if (!el || !panel) return;
+    var real = el.style;
+    var proxy = new Proxy(real, {
+      set: function(t, prop, val) {
+        if (prop === 'display') {
+          var show = val !== 'none' && val !== '';
+          panel.classList.toggle('is-visible', show);
+          if (show  && onShow) onShow();
+          if (!show && onHide) onHide();
+          try { t[prop] = val; } catch(e){}
+          return true;
+        }
+        try { t[prop] = val; } catch(e){}
+        return true;
+      },
+      get: function(t, prop) {
+        var v = t[prop];
+        return typeof v === 'function' ? v.bind(t) : v;
+      }
+    });
+    Object.defineProperty(el, 'style', { get: function(){ return proxy; }, configurable: true });
+  }
+
+  function compactHero() {
+    var h = document.getElementById('heroSection');
+    if (h) h.classList.add('hero-compact');
+  }
+
+  function revealFilePanel() {
+    var fp = document.getElementById('filePanel');
+    if (fp) fp.classList.add('is-visible');
+  }
+
+  function hideFilePanel() {
+    var slc = document.getElementById('shareLinkCard');
+    var cs  = document.getElementById('chatSection');
+    var slcHidden = !slc || slc.style.display === 'none' || slc.style.display === '';
+    var csHidden  = !cs  || cs.style.display  === 'none' || cs.style.display  === '';
+    if (slcHidden && csHidden) {
+      var fp = document.getElementById('filePanel');
+      if (fp) fp.classList.remove('is-visible');
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded', function() {
+
+    /* Sender path */
+    interceptDisplay(
+      document.getElementById('shareLinkCard'),
+      document.getElementById('shareLinkPanel'),
+      function() { revealFilePanel(); compactHero(); },
+      function() { hideFilePanel(); }
+    );
+
+    /* Receiver path */
+    interceptDisplay(
+      document.getElementById('chatSection'),
+      document.getElementById('chatPanel'),
+      function() { revealFilePanel(); compactHero(); },
+      function() { hideFilePanel(); }
+    );
+
+    /* Instant hero compact on Create/Join */
+    ['createBtn','joinBtn'].forEach(function(id) {
+      var btn = document.getElementById(id);
+      if (btn) btn.addEventListener('click', compactHero);
+    });
+
+    /* multiroom.js panels — no interceptor needed, multiroom.js toggles
+       is-visible directly on #membersPanel / #scorePanel */
+
+  });
+})();
+</script>
+
+<!-- QR Code library (qrcodejs) + jsQR for scanning -->
+<script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+
+<!-- Service Worker registration -->
+<script>
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js', { scope: '/' })
+    .then(function(reg) { console.log('[SW] Registered:', reg.scope); })
+    .catch(function(e)  { console.warn('[SW] Registration failed:', e.message); });
+}
+</script>
+
+<!-- QR: creator-side render + share + download + receiver live scanner -->
+<script>
+// ─── State ────────────────────────────────────────────────────────────────────
+var _qrInstance   = null;
+var _qrCurrentUrl = '';
+var _scanStream   = null;
+var _scanRaf      = null;
+var _scanCanvas   = document.createElement('canvas');
+var _scanCtx      = _scanCanvas.getContext('2d');
+
+// ─── CREATOR: render QR automatically when share link is set ─────────────────
+window.__onShareLinkSet = function(url) {
+  _qrCurrentUrl = url;
+  var wrap = document.getElementById('qrWrap');
+  var div  = document.getElementById('qrCanvas');
+  if (!wrap || !div) return;
+  // Clear old instance
+  div.innerHTML = '';
+  _qrInstance = null;
+
+  function doRender() {
+    if (typeof QRCode === 'undefined') { setTimeout(doRender, 200); return; }
+    try {
+      _qrInstance = new QRCode(div, {
+        text:         url,
+        width:        180,
+        height:       180,
+        colorDark:    '#111827',
+        colorLight:   '#ffffff',
+        correctLevel: QRCode.CorrectLevel.M
+      });
+      wrap.style.display = 'block';
+    } catch(e) { console.warn('[QR] render error:', e); }
+  }
+  doRender();
+};
+
+// Get the rendered QR as a PNG data-URL
+function _getQrDataUrl() {
+  var div = document.getElementById('qrCanvas');
+  if (!div) return null;
+  var img    = div.querySelector('img');
+  var canvas = div.querySelector('canvas');
+  if (canvas) return canvas.toDataURL('image/png');
+  if (img && img.src) return img.src;
+  return null;
+}
+
+// ─── DOWNLOAD QR ─────────────────────────────────────────────────────────────
+function downloadQr() {
+  var data = _getQrDataUrl();
+  if (!data) { console.warn('[QR] nothing to download yet'); return; }
+  var a = document.createElement('a');
+  a.href     = data;
+  a.download = 'tranzo-room-qr.png';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+// ─── SHARE QR (Web Share API — WhatsApp, FB, Instagram, etc.) ────────────────
+function shareQr() {
+  var url  = _qrCurrentUrl;
+  var data = _getQrDataUrl();
+  if (!url) return;
+
+  // Try Web Share API with file (image) — supported on Android Chrome / iOS Safari
+  if (navigator.share && data) {
+    fetch(data)
+      .then(function(r) { return r.blob(); })
+      .then(function(blob) {
+        var file = new File([blob], 'tranzo-room-qr.png', { type: 'image/png' });
+        if (navigator.canShare && navigator.canShare({ files: [file] })) {
+          return navigator.share({
+            title: 'Join my Tranzo room',
+            text:  'Scan this QR or tap the link to join my file transfer room',
+            url:   url,
+            files: [file]
+          });
+        } else {
+          // Share URL only (no file)
+          return navigator.share({ title: 'Join my Tranzo room', text: 'Tap to join my file transfer room', url: url });
+        }
+      })
+      .catch(function(e) { if (e.name !== 'AbortError') console.warn('[QR] share error:', e); });
+    return;
+  }
+
+  // Fallback: share URL only
+  if (navigator.share) {
+    navigator.share({ title: 'Join my Tranzo room', url: url }).catch(function() {});
+    return;
+  }
+
+  // Last resort: copy to clipboard
+  navigator.clipboard.writeText(url).then(function() {
+    var btn = document.getElementById('qrShareBtn');
+    if (btn) { btn.innerHTML = '&#10003; Link copied!'; setTimeout(function() { btn.innerHTML = '&#8599; Share'; }, 2000); }
+  }).catch(function() {});
+}
+
+// ─── WHATSAPP SHARE ──────────────────────────────────────────────────────────
+function shareWhatsapp() {
+  var url = _qrCurrentUrl;
+  if (!url) return;
+  var text = encodeURIComponent('Join my Tranzo file transfer room: ' + url);
+  window.open('https://api.whatsapp.com/send?text=' + text, '_blank');
+}
+
+// ─── RECEIVER: live camera QR scanner ────────────────────────────────────────
+function openQrScanner() {
+  var modal = document.getElementById('qrScanModal');
+  if (!modal) return;
+  modal.style.display = 'flex';
+  _startCamera();
+}
+
+function closeQrScanner() {
+  _stopCamera();
+  var modal = document.getElementById('qrScanModal');
+  if (modal) modal.style.display = 'none';
+  _setScanStatus('Scanning\u2026', false);
+}
+
+function _startCamera() {
+  var video  = document.getElementById('qrVideo');
+  var status = document.getElementById('qrScanStatus');
+  if (!video) return;
+
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    _setScanStatus('Camera not available on this browser', true);
+    return;
+  }
+
+  navigator.mediaDevices.getUserMedia({
+    video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 640 } }
+  }).then(function(stream) {
+    _scanStream = stream;
+    video.srcObject = stream;
+    video.play();
+    video.addEventListener('loadedmetadata', function() {
+      _scanCanvas.width  = video.videoWidth  || 640;
+      _scanCanvas.height = video.videoHeight || 640;
+      _scanFrame();
+    }, { once: true });
+  }).catch(function(err) {
+    console.warn('[QR Scanner]', err);
+    var msg = err.name === 'NotAllowedError'
+      ? 'Camera permission denied. Upload an image instead.'
+      : 'Camera unavailable. Upload an image instead.';
+    _setScanStatus(msg, true);
+  });
+}
+
+function _stopCamera() {
+  if (_scanRaf) { cancelAnimationFrame(_scanRaf); _scanRaf = null; }
+  if (_scanStream) {
+    _scanStream.getTracks().forEach(function(t) { t.stop(); });
+    _scanStream = null;
+  }
+  var video = document.getElementById('qrVideo');
+  if (video) { video.srcObject = null; }
+}
+
+function _scanFrame() {
+  var video = document.getElementById('qrVideo');
+  if (!video || !_scanStream) return;
+
+  if (video.readyState === video.HAVE_ENOUGH_DATA) {
+    _scanCtx.drawImage(video, 0, 0, _scanCanvas.width, _scanCanvas.height);
+    var imageData = _scanCtx.getImageData(0, 0, _scanCanvas.width, _scanCanvas.height);
+
+    // jsQR may not be loaded yet — wait for it
+    if (typeof jsQR !== 'undefined') {
+      var code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'dontInvert' });
+      if (code && code.data) {
+        _onQrDetected(code.data);
+        return;   // stop scanning
+      }
+    }
+  }
+  _scanRaf = requestAnimationFrame(_scanFrame);
+}
+
+function _onQrDetected(data) {
+  // Visual feedback
+  var frame = document.getElementById('qrScanFrame');
+  if (frame) {
+    frame.style.transition = 'outline .2s';
+    frame.style.outline = '3px solid var(--em)';
+  }
+  _setScanStatus('&#10003; QR detected — joining room…', false);
+
+  // Extract room param
+  var room = data;
+  try {
+    var u = new URL(data);
+    var r = u.searchParams.get('room');
+    if (r) room = r;
+  } catch {}
+
+  // Stop camera and close modal after short success delay
+  setTimeout(function() {
+    _stopCamera();
+    var modal = document.getElementById('qrScanModal');
+    if (modal) modal.style.display = 'none';
+
+    // Fill room input and join
+    var roomInput = document.getElementById('roomId');
+    if (roomInput) {
+      roomInput.value = room;
+      roomInput.dispatchEvent(new Event('input'));
+    }
+
+    // If mode=download was in the URL, set auto-accept
+    try {
+      var u2 = new URL(data);
+      if (u2.searchParams.get('mode') === 'download') {
+        try { sessionStorage.setItem('autoAccept:' + room, '1'); } catch {}
+      }
+    } catch {}
+
+    var joinBtn = document.getElementById('joinBtn');
+    if (joinBtn) joinBtn.click();
+
+    _setScanStatus('Scanning\u2026', false);
+    if (frame) { frame.style.outline = ''; }
+  }, 600);
+}
+
+function _setScanStatus(msg, isError) {
+  var el = document.getElementById('qrScanStatus');
+  if (!el) return;
+  el.innerHTML = msg;
+  el.style.color = isError ? '#FCA5A5' : '#fff';
+}
+
+// ─── FALLBACK: upload image ──────────────────────────────────────────────────
+function handleQrImageUpload(input) {
+  var file = input && input.files && input.files[0];
+  if (!file) return;
+
+  var reader = new FileReader();
+  reader.onload = function(e) {
+    var img = new Image();
+    img.onload = function() {
+      var c = document.createElement('canvas');
+      c.width = img.width; c.height = img.height;
+      var ctx = c.getContext('2d');
+      ctx.drawImage(img, 0, 0);
+      var imageData = ctx.getImageData(0, 0, c.width, c.height);
+
+      if (typeof jsQR === 'undefined') {
+        _setScanStatus('Scanner loading, please wait…', false);
+        setTimeout(function() { handleQrImageUpload(input); }, 400);
+        return;
+      }
+
+      var code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'dontInvert' });
+      if (!code) {
+        _setScanStatus('&#10060; No QR found in image — try another', true);
+        setTimeout(function() { _setScanStatus('Scanning\u2026', false); }, 2500);
+        input.value = '';
+        return;
+      }
+      input.value = '';
+      _onQrDetected(code.data);
+    };
+    img.src = e.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+</script>
+
+<script src="multiroom.js"></script>
+<script src="script.js"></script>
+{% endblock %}

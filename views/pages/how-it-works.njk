@@ -1,0 +1,110 @@
+{% extends "../layouts/base.njk" %}
+
+{% block title %}How Tranzo Works – WebRTC P2P File Transfer Explained{% endblock %}
+{% block metaDesc %}Learn how Tranzo transfers files directly between browsers using WebRTC. Step-by-step guide to peer-to-peer file sharing without a cloud server.{% endblock %}
+{% block canonical %}<link rel="canonical" href="https://share.rumnnlg.com/how-it-works" />{% endblock %}
+{% block ogTitle %}How Tranzo Works – WebRTC File Transfer Explained{% endblock %}
+{% block ogUrl %}https://share.rumnnlg.com/how-it-works{% endblock %}
+
+{% block adTop %}
+<div class="container-lg pt-3">
+  <div class="ad-slot ad-slot-leaderboard">
+    <iframe src="about:blank" title="Advertisement" aria-label="Advertisement" scrolling="no"></iframe>
+  </div>
+</div>
+{% endblock %}
+
+{% block content %}
+<main class="content-page">
+  <div class="container-lg">
+    <div class="row justify-content-center">
+      <div class="col-12 col-lg-8">
+
+        <div class="page-eyebrow">&#128270; Under the Hood</div>
+        <h1>How <span class="grad">Tranzo</span> Works</h1>
+        <p class="lead">Tranzo uses WebRTC to create a direct, encrypted tunnel between two browsers — no file ever touches our servers.</p>
+
+        <div class="ad-slot ad-slot-rect mb-4">
+          <iframe src="about:blank" title="Advertisement" aria-label="Advertisement" scrolling="no"></iframe>
+        </div>
+
+        <h2>Step-by-Step</h2>
+
+        <div class="info-card mb-3">
+          <div class="d-flex gap-3 align-items-start">
+            <div style="width:36px;height:36px;border-radius:50%;background:var(--em);color:#fff;display:flex;align-items:center;justify-content:center;font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:15px;flex-shrink:0;">1</div>
+            <div>
+              <h3 style="margin-top:0;">Create or Join a Room</h3>
+              <p class="mb-0">The sender creates a room with a unique ID. The receiver enters the same room ID (or scans the QR code). Both browsers connect to Tranzo's signaling server over WebSocket.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="info-card mb-3">
+          <div class="d-flex gap-3 align-items-start">
+            <div style="width:36px;height:36px;border-radius:50%;background:var(--em);color:#fff;display:flex;align-items:center;justify-content:center;font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:15px;flex-shrink:0;">2</div>
+            <div>
+              <h3 style="margin-top:0;">WebRTC Handshake (SDP + ICE)</h3>
+              <p class="mb-0">The signaling server exchanges SDP offers/answers and ICE candidates between the two peers. This is just connection metadata — no file data passes through our server.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="info-card mb-3">
+          <div class="d-flex gap-3 align-items-start">
+            <div style="width:36px;height:36px;border-radius:50%;background:var(--em);color:#fff;display:flex;align-items:center;justify-content:center;font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:15px;flex-shrink:0;">3</div>
+            <div>
+              <h3 style="margin-top:0;">Direct Peer Connection Opens</h3>
+              <p class="mb-0">Once ICE negotiation succeeds, a direct DataChannel is established. On the same LAN this is usually instant. On different networks, our coturn TURN relay is used as a fallback.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="info-card mb-3">
+          <div class="d-flex gap-3 align-items-start">
+            <div style="width:36px;height:36px;border-radius:50%;background:var(--amb);color:#fff;display:flex;align-items:center;justify-content:center;font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:15px;flex-shrink:0;">4</div>
+            <div>
+              <h3 style="margin-top:0;">File is Chunked and Sent</h3>
+              <p class="mb-0">The file is split into 64 KB chunks and streamed over the DataChannel. A progress bar, transfer speed, and ETA are calculated in real time.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="info-card mb-4">
+          <div class="d-flex gap-3 align-items-start">
+            <div style="width:36px;height:36px;border-radius:50%;background:var(--amb);color:#fff;display:flex;align-items:center;justify-content:center;font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:15px;flex-shrink:0;">5</div>
+            <div>
+              <h3 style="margin-top:0;">Receiver Downloads Instantly</h3>
+              <p class="mb-0">Chunks are reassembled in memory via a Web Worker and presented as a download. Files under 300 MB download automatically; larger files use the <code>showSaveFilePicker</code> API to stream directly to disk.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Mid-page ad -->
+        <div class="ad-slot ad-slot-banner my-4">
+          <iframe src="about:blank" title="Advertisement" aria-label="Advertisement" scrolling="no"></iframe>
+        </div>
+
+        <h2>Technology Used</h2>
+        <ul>
+          <li><strong>WebRTC RTCPeerConnection</strong> — direct browser-to-browser data channel</li>
+          <li><strong>Socket.IO</strong> — lightweight signaling (SDP/ICE exchange only)</li>
+          <li><strong>coturn</strong> — TURN relay server for NAT traversal fallback</li>
+          <li><strong>Web Workers</strong> — off-main-thread chunk assembly for smooth UI</li>
+          <li><strong>File System Access API</strong> — stream large files directly to disk</li>
+          <li><strong>QRCode.js + jsQR</strong> — room link QR generation and camera scanning</li>
+        </ul>
+
+        <h2>Privacy Guarantee</h2>
+        <p>Our signaling server only sees room IDs and WebSocket connection events. It never sees file names, file contents, or any metadata about what you're transferring. Once the peer connection is established, the signaling server is completely out of the loop.</p>
+
+        <div class="d-flex gap-3 mt-4">
+          <a href="/" class="btn-em" style="text-decoration:none;">Try It Now &#9889;</a>
+          <a href="/security" class="btn-ghost" style="text-decoration:none;">Security Details</a>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</main>
+{% endblock %}

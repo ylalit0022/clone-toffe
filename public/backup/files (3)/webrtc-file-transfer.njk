@@ -1,0 +1,103 @@
+{% extends "../layouts/base.njk" %}
+
+{% block title %}WebRTC File Transfer – Free Browser-to-Browser Sharing | Tranzo{% endblock %}
+{% block metaDesc %}Tranzo uses WebRTC to transfer files directly between browsers — no upload, no cloud, no server storage. Fast, encrypted, and completely free.{% endblock %}
+{% block canonical %}<link rel="canonical" href="https://share.rumnnlg.com/webrtc-file-transfer" />{% endblock %}
+{% block ogTitle %}WebRTC File Transfer – Browser-to-Browser | Tranzo{% endblock %}
+{% block ogUrl %}https://share.rumnnlg.com/webrtc-file-transfer{% endblock %}
+
+{% block adTop %}
+<div class="container-lg pt-3">
+  <div class="ad-slot ad-slot-leaderboard">
+    <iframe src="about:blank" title="Advertisement" aria-label="Advertisement" scrolling="no"></iframe>
+  </div>
+</div>
+{% endblock %}
+
+{% block content %}
+<main class="content-page">
+  <div class="container-lg">
+    <div class="row justify-content-center">
+      <div class="col-12 col-lg-8">
+
+        <div class="page-eyebrow">&#128257; WebRTC</div>
+        <h1>WebRTC File Transfer — <span class="grad">How It Works</span></h1>
+        <p class="lead">WebRTC is the browser standard for real-time peer-to-peer communication. Tranzo uses its DataChannel API to stream files directly between browsers at full network speed.</p>
+
+        <div class="d-flex gap-3 mb-5 flex-wrap">
+          <a href="/" class="btn-em" style="text-decoration:none;">Try WebRTC Transfer &#9889;</a>
+          <a href="/how-it-works" class="btn-ghost" style="text-decoration:none;">Full Tech Details</a>
+        </div>
+
+        <div class="ad-slot ad-slot-rect mb-4">
+          <iframe src="about:blank" title="Advertisement" aria-label="Advertisement" scrolling="no"></iframe>
+        </div>
+
+        <h2>What is WebRTC?</h2>
+        <p>WebRTC (Web Real-Time Communication) is an open standard built into every modern browser. Originally designed for video calls, it includes a general-purpose <strong>DataChannel</strong> API that can transmit arbitrary binary data — including files — at high speed between peers.</p>
+        <p>Unlike HTTP uploads, WebRTC DataChannels are:</p>
+        <ul>
+          <li><strong>Peer-to-peer</strong> — data flows directly between devices, not through a server</li>
+          <li><strong>Encrypted by default</strong> — DTLS 1.3 is mandatory in the WebRTC spec</li>
+          <li><strong>Low latency</strong> — no intermediary storage means no queuing delay</li>
+          <li><strong>Bi-directional</strong> — both ends can send simultaneously</li>
+        </ul>
+
+        <h2>WebRTC File Transfer vs HTTP Upload</h2>
+        <div class="g-card" style="overflow-x:auto;">
+          <table class="table table-sm mb-0" style="font-size:14px;">
+            <thead>
+              <tr style="background:var(--surface);">
+                <th>Feature</th>
+                <th style="color:var(--em);">WebRTC (Tranzo)</th>
+                <th>HTTP Upload</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>Routing</td><td style="color:var(--em);">Direct peer-to-peer</td><td>Via server</td></tr>
+              <tr><td>Sender bandwidth</td><td style="color:var(--em);">Upload once</td><td>Upload once (to server)</td></tr>
+              <tr><td>Server stores file?</td><td style="color:var(--em);">Never</td><td>Yes (until deleted)</td></tr>
+              <tr><td>Speed (same LAN)</td><td style="color:var(--em);">50–100 MB/s</td><td>Limited by server link</td></tr>
+              <tr><td>Encryption</td><td style="color:var(--em);">DTLS E2E</td><td>TLS to server only</td></tr>
+              <tr><td>File size limit</td><td style="color:var(--em);">None</td><td>Set by server config</td></tr>
+              <tr><td>Account required</td><td style="color:var(--em);">No</td><td>Usually yes</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Mid-page ad -->
+        <div class="ad-slot ad-slot-banner my-4">
+          <iframe src="about:blank" title="Advertisement" aria-label="Advertisement" scrolling="no"></iframe>
+        </div>
+
+        <h2>How the DataChannel Works in Tranzo</h2>
+        <div class="info-card mb-3">
+          <h3 style="margin-top:0;">1. Signaling</h3>
+          <p class="mb-0">Tranzo's Socket.IO server exchanges SDP (Session Description Protocol) offers and ICE candidates — the minimum metadata needed to establish a direct connection. No file data ever passes through this server.</p>
+        </div>
+        <div class="info-card mb-3">
+          <h3 style="margin-top:0;">2. ICE Negotiation and NAT Traversal</h3>
+          <p class="mb-0">ICE (Interactive Connectivity Establishment) uses STUN servers to discover public IP addresses and a TURN relay as a last resort for strict firewalls. Once a viable path is found, the DataChannel opens.</p>
+        </div>
+        <div class="info-card mb-3">
+          <h3 style="margin-top:0;">3. Chunked Binary Transfer</h3>
+          <p class="mb-0">The file is read in 64 KB chunks using the <code>FileReader</code> API. Each chunk is sent as an ArrayBuffer over the DataChannel. A Web Worker reassembles chunks on the receiver side without blocking the UI thread.</p>
+        </div>
+        <div class="info-card mb-4">
+          <h3 style="margin-top:0;">4. Backpressure Control</h3>
+          <p class="mb-0">Tranzo monitors the DataChannel's <code>bufferedAmount</code> property and pauses chunk sending when the buffer fills. This prevents memory overflow on slow connections and ensures reliable delivery of very large files.</p>
+        </div>
+
+        <h2>Browser Support</h2>
+        <p>WebRTC DataChannels are supported in all modern browsers. Tranzo works on Chrome 80+, Firefox 75+, Edge 80+, and Safari 13+. No plugins or extensions are required.</p>
+
+        <div class="d-flex gap-3 mt-4">
+          <a href="/" class="btn-em" style="text-decoration:none;">Start a WebRTC Transfer &#9889;</a>
+          <a href="/security" class="btn-ghost" style="text-decoration:none;">Security Details</a>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</main>
+{% endblock %}

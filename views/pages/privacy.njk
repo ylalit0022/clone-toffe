@@ -1,0 +1,60 @@
+{% extends "../layouts/base.njk" %}
+
+{% block title %}Privacy Policy – Tranzo{% endblock %}
+{% block metaDesc %}Tranzo's privacy policy. We don't store your files, don't log personal data, and don't sell information to third parties.{% endblock %}
+{% block canonical %}<link rel="canonical" href="https://share.rumnnlg.com/privacy" />{% endblock %}
+{% block ogUrl %}https://share.rumnnlg.com/privacy{% endblock %}
+
+{% block content %}
+<main class="content-page">
+  <div class="container-lg">
+    <div class="row justify-content-center">
+      <div class="col-12 col-lg-7">
+        <div class="page-eyebrow">&#128274; Legal</div>
+        <h1>Privacy <span class="grad">Policy</span></h1>
+        <p class="lead">Last updated: <strong>January 2025</strong></p>
+        <p>Tranzo ("we", "us", "our") operates the website at <strong>share.rumnnlg.com</strong>. This policy explains what information we collect and how we use it.</p>
+
+        <h2>1. Information We Do NOT Collect</h2>
+        <ul>
+          <li>File names, file contents, or file metadata of any transfer</li>
+          <li>Names, email addresses, or account credentials (no account system exists)</li>
+          <li>Device identifiers linked to personal profiles</li>
+        </ul>
+
+        <h2>2. Information We Collect Automatically</h2>
+        <p>When you visit Tranzo, our server automatically receives standard web server log data including your IP address, browser type, referring URL, and page requested. This data is used solely for abuse prevention and server health monitoring. Logs are retained for no more than 30 days and are never sold.</p>
+
+        <h2>3. WebRTC Signaling Data</h2>
+        <p>To establish a peer connection, our signaling server exchanges Session Description Protocol (SDP) messages and ICE candidates between peers. This metadata contains connection information only — it does not include file data. It is processed in-memory and never written to disk.</p>
+
+        <h2>4. Cookies</h2>
+        <p>Tranzo uses minimal session data stored in your browser's <code>sessionStorage</code> for room auto-accept preferences. This data never leaves your device. For advertising purposes, third-party ad networks may set cookies — see our <a href="/cookies">Cookie Policy</a>.</p>
+
+        <h2>5. Advertising</h2>
+        <p>We may display advertisements served by third-party ad networks including Google AdSense. These networks may use cookies and web beacons to serve ads based on your previous visits to our site and other sites. You can opt out of personalized advertising by visiting <a href="https://www.google.com/settings/ads" target="_blank" rel="noopener">Google's Ads Settings</a> or <a href="https://www.networkadvertising.org/choices/" target="_blank" rel="noopener">NAI opt-out page</a>.</p>
+
+        <h2>6. Third-Party Services</h2>
+        <p>Tranzo uses the following third-party services:</p>
+        <ul>
+          <li><strong>Google Fonts</strong> — font files loaded from Google's CDN</li>
+          <li><strong>jsDelivr CDN</strong> — Bootstrap and QR library files</li>
+          <li><strong>coturn</strong> — TURN relay server operated by us for NAT traversal</li>
+        </ul>
+
+        <h2>7. Data Retention</h2>
+        <p>Room state is stored in server memory only and is deleted when all participants leave or the server restarts. No persistent file or transfer records are kept.</p>
+
+        <h2>8. Children's Privacy</h2>
+        <p>Tranzo is not directed at children under 13. We do not knowingly collect personal information from children under 13.</p>
+
+        <h2>9. Changes to This Policy</h2>
+        <p>We may update this policy from time to time. Changes will be posted on this page with a new "Last updated" date.</p>
+
+        <h2>10. Contact</h2>
+        <p>For privacy-related questions, please use our <a href="/contact">contact form</a>.</p>
+      </div>
+    </div>
+  </div>
+</main>
+{% endblock %}

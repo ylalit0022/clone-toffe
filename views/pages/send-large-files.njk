@@ -1,0 +1,137 @@
+{% extends "../layouts/base.njk" %}
+
+{% block title %}Send Large Files Free – No Size Limit P2P Transfer | Tranzo{% endblock %}
+{% block metaDesc %}Send large files of any size for free using Tranzo's WebRTC peer-to-peer transfer. No upload limit, no cloud storage, no signup required.{% endblock %}
+{% block canonical %}<link rel="canonical" href="https://share.rumnnlg.com/send-large-files" />{% endblock %}
+{% block ogTitle %}Send Large Files Free – No Size Limit | Tranzo{% endblock %}
+{% block ogUrl %}https://share.rumnnlg.com/send-large-files{% endblock %}
+
+{% block adTop %}
+<div class="container-lg pt-3">
+  <div class="ad-slot ad-slot-leaderboard">
+    <iframe src="about:blank" title="Advertisement" aria-label="Advertisement" scrolling="no"></iframe>
+  </div>
+</div>
+{% endblock %}
+
+{% block content %}
+<main class="content-page">
+  <div class="container-lg">
+    <div class="row justify-content-center">
+      <div class="col-12 col-lg-8">
+
+        <div class="page-eyebrow">&#128194; Large Files</div>
+        <h1>Send Large Files <span class="grad">Free</span></h1>
+        <p class="lead">Tranzo has no file size limit. Send 10 GB, 50 GB, or more — directly from your browser, encrypted, with no cloud upload required.</p>
+
+        <div class="d-flex gap-3 mb-5 flex-wrap">
+          <a href="/" class="btn-em" style="text-decoration:none;">Start Sending &#9889;</a>
+          <a href="/how-it-works" class="btn-ghost" style="text-decoration:none;">How It Works</a>
+        </div>
+
+        <div class="ad-slot ad-slot-rect mb-4">
+          <iframe src="about:blank" title="Advertisement" aria-label="Advertisement" scrolling="no"></iframe>
+        </div>
+
+        <h2>Why Traditional Services Fail at Large Files</h2>
+        <p>Most file-sharing services impose limits: WeTransfer caps free transfers at 2 GB, Google Drive at 5 TB but requires an account and slow uploads, and email attachments are capped at 25 MB. Even "large file" services require you to upload first, wait, then share a link.</p>
+        <p>Tranzo eliminates the upload step entirely. Your file streams directly from your device to the recipient in real time, at the full speed of your connection.</p>
+
+        <h2>How Tranzo Handles Large Files</h2>
+        <div class="info-card mb-3">
+          <div class="d-flex gap-3">
+            <div class="feature-icon">&#128192;</div>
+            <div>
+              <h3 style="margin-top:0;">Chunked Streaming</h3>
+              <p class="mb-0">Files are split into 64 KB chunks and sent sequentially. This means even a 100 GB file never fully loads into memory — it streams from disk to the peer in real time.</p>
+            </div>
+          </div>
+        </div>
+        <div class="info-card mb-3">
+          <div class="d-flex gap-3">
+            <div class="feature-icon amb">&#128229;</div>
+            <div>
+              <h3 style="margin-top:0;">Stream-to-Disk on Receiver</h3>
+              <p class="mb-0">Files over 300 MB use the <strong>File System Access API</strong> to write chunks directly to disk as they arrive. The receiver's browser memory stays clean regardless of file size.</p>
+            </div>
+          </div>
+        </div>
+        <div class="info-card mb-4">
+          <div class="d-flex gap-3">
+            <div class="feature-icon">&#9208;</div>
+            <div>
+              <h3 style="margin-top:0;">Pause &amp; Resume</h3>
+              <p class="mb-0">Need to pause a large transfer? Hit the Pause button. The stream buffers gracefully and resumes from where it left off when you're ready.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Mid-page ad -->
+        <div class="ad-slot ad-slot-banner my-4">
+          <iframe src="about:blank" title="Advertisement" aria-label="Advertisement" scrolling="no"></iframe>
+        </div>
+
+        <h2>Comparison: Tranzo vs Other Large File Services</h2>
+        <div class="g-card" style="overflow-x:auto;">
+          <table class="table table-sm mb-0" style="font-size:14px;">
+            <thead>
+              <tr style="background:var(--surface);">
+                <th>Service</th>
+                <th>Max Size (Free)</th>
+                <th>Upload to Server?</th>
+                <th>Account Required?</th>
+                <th>Encrypted?</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong style="color:var(--em);">Tranzo</strong></td>
+                <td><strong style="color:var(--em);">Unlimited</strong></td>
+                <td><strong style="color:var(--em);">No (P2P)</strong></td>
+                <td><strong style="color:var(--em);">No</strong></td>
+                <td><strong style="color:var(--em);">Yes (DTLS)</strong></td>
+              </tr>
+              <tr>
+                <td>WeTransfer</td>
+                <td>2 GB</td>
+                <td>Yes</td>
+                <td>No</td>
+                <td>In transit only</td>
+              </tr>
+              <tr>
+                <td>Google Drive</td>
+                <td>15 GB total</td>
+                <td>Yes</td>
+                <td>Yes</td>
+                <td>In transit only</td>
+              </tr>
+              <tr>
+                <td>Dropbox</td>
+                <td>2 GB total</td>
+                <td>Yes</td>
+                <td>Yes</td>
+                <td>In transit only</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2>Step-by-Step: Send a Large File</h2>
+        <ol>
+          <li>Go to <a href="/">share.rumnnlg.com</a> on the sender's device</li>
+          <li>Enter a device name and click <strong>Create</strong> to create a room</li>
+          <li>Share the room link or QR code with the receiver</li>
+          <li>Once the receiver joins, drop your large file into the drop zone</li>
+          <li>The receiver accepts the transfer — it begins streaming immediately</li>
+          <li>Monitor progress, speed, and ETA in the transfer panel</li>
+        </ol>
+
+        <div class="d-flex gap-3 mt-4">
+          <a href="/" class="btn-em" style="text-decoration:none;">Send a Large File Now &#9889;</a>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</main>
+{% endblock %}

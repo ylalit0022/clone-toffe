@@ -822,9 +822,13 @@ createBtn.onclick = () => { const id = Math.random().toString(36).slice(2, 8).to
 joinBtn.onclick   = () => { const r = roomInput.value.trim(); if (r) joinRoom(r, "join"); };
 socket.on("room-status", ({ room, users }) => {
   if (room !== currentRoom) return;
-  if (users >= 2) { setConnectedUI(true, "Connected", `Room: ${room} — Both connected`); addMsg(`<span class="muted">✅ Peer joined. Connected.</span>`); }
+  if (users >= 2) { setConnectedUI(true, "Connected", `Room: ${room} — ${users} user${users>2?"s":""} connected`); addMsg(`<span class="muted">✅ ${users} users in room.</span>`); }
   else            { setConnectedUI(false, "Waiting...", `Room: ${room} — Waiting...`); }
 });
+
+// room-peers: received when we join — full list of existing members
+// Handled by multiroom.js (renderMemberPanel). Nothing to do here.
+socket.on("room-peers", () => {});
 
 // ─── CHAT ─────────────────────────────────────────────────────────────────────
 let typingTimer = null;
@@ -1403,12 +1407,30 @@ socket.on("file-offer", ({ from, fromName, fromShort, meta }) => {
   pendingIncoming = { from, meta };
   try { const id = meta?.id || `${meta?.name}|${meta?.size}`; upsertRecvItem(id, meta?.name, meta?.size || 0, "pending", 0, meta?.size || 0); renderRecvQueueUI(); } catch {}
   const who = fromName || fromShort || (from ? from.substring(0, 5) : "User");
-  // BUG FIX 2: Always show the modal for every file offer.
-  // The previous autoAccept branch silently accepted file #2, #3 etc. without
-  // showing the modal — and without setting pendingWritable — so transfers
-  // would start with no save destination and appear to "not respond" on receiver.
+
+  // ── Solo/multi modal rule (set by multiroom.js) ───────────────────────────
+  // Solo room (1 peer): skip modal after first accept — auto-accept subsequent files.
+  // Multi room (2+ peers): always show modal so each user explicitly decides.
+  // window.__mrShouldShowModal is set by multiroom.js before this handler fires.
+  const showModal = (typeof window.__mrShouldShowModal !== "undefined")
+    ? window.__mrShouldShowModal
+    : true;
+
+  if (!showModal) {
+    // Solo room, first already done — auto-accept without modal
+    addMsg(`<span class="muted">✅ Auto-accepted from <b>${who}</b>: ${meta.name} (${fmtBytes(meta.size)})</span>`);
+    socket.emit("file-answer", { to: from, accepted: true });
+    _primaryPeerSocketId = from;
+    pendingIncoming = null;
+    setStatus("Auto-accepted. Connecting P2P...");
+    return;
+  }
+
+  // Show modal — user must explicitly accept/reject
   modalInfo.innerText = `From: ${who}\nFile: ${meta.name}\nSize: ${fmtBytes(meta.size)}\nType: ${meta.type}`;
   modalBg.style.display = "flex";
+  // Reset flag so next offer re-evaluates
+  window.__mrShouldShowModal = undefined;
 });
 
 rejectBtn.onclick = () => {

@@ -1,49 +1,65 @@
 // ═══════════════════════════════════════════════
 //  ice.js  — ICE / TURN server configuration
+//
+//  SECURITY FIX: TURN credentials are NO LONGER hardcoded here.
+//  They are fetched from the server's /api/ice-config endpoint,
+//  which reads them from environment variables at runtime.
+//
+//  This means:
+//    - Credentials are never visible in the client JS bundle
+//    - You can rotate credentials without redeploying the client
+//    - DevTools inspection of source code reveals nothing sensitive
+//
+//  Usage:
+//    await initIceConfig();          // call once on startup (app.js)
+//    const servers = getIceServers(); // call when creating RTCPeerConnection
 // ═══════════════════════════════════════════════
 
-// ── India TURN server credentials ────────────────
-const INDIA_TURN_HOST = "share.rumnnlg.com";
-const INDIA_TURN_USER = "testuser";
-const INDIA_TURN_PASS = "testpass123";
+let _iceServers = null;   // cached after first fetch
 
-export function buildIceServers() {
-  const servers = [
-    { urls: "stun:stun.l.google.com:19302" },
-    { urls: "stun:stun1.l.google.com:19302" },
-    { urls: "stun:stun2.l.google.com:19302" },
-    { urls: "stun:stun3.l.google.com:19302" },
-    { urls: "stun:stun4.l.google.com:19302" },
-    { urls: "stun:stun.cloudflare.com:3478" },
-  ];
+// Fallback STUN-only config used if the server is unreachable
+// (no TURN = LAN/open-NAT only, but still better than nothing)
+const STUN_ONLY_FALLBACK = [
+  { urls: "stun:stun.l.google.com:19302" },
+  { urls: "stun:stun1.l.google.com:19302" },
+  { urls: "stun:stun.cloudflare.com:3478" },
+];
 
-  if (INDIA_TURN_HOST && INDIA_TURN_USER && INDIA_TURN_PASS) {
-    servers.push({
-      urls: [
-        `turn:${INDIA_TURN_HOST}:3478?transport=udp`,
-        `turn:${INDIA_TURN_HOST}:3478?transport=tcp`,
-        `turns:${INDIA_TURN_HOST}:5349?transport=tcp`,
-      ],
-      username: INDIA_TURN_USER,
-      credential: INDIA_TURN_PASS,
-    });
+// ── Fetch ice servers from server ────────────────────────────
+export async function initIceConfig() {
+  if (_iceServers) return;   // already fetched
+
+  try {
+    const res = await fetch("/api/ice-config", { credentials: "same-origin" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (Array.isArray(data.iceServers) && data.iceServers.length > 0) {
+      _iceServers = data.iceServers;
+      console.log("[ICE] Config loaded from server —", _iceServers.length, "servers");
+    } else {
+      throw new Error("Empty iceServers array");
+    }
+  } catch (e) {
+    console.warn("[ICE] Failed to fetch /api/ice-config — using STUN-only fallback:", e.message);
+    _iceServers = STUN_ONLY_FALLBACK;
   }
-
-  // Metered global fallback
-  servers.push({
-    urls: [
-      "turn:global.relay.metered.ca:80?transport=udp",
-      "turn:global.relay.metered.ca:80?transport=tcp",
-      "turn:global.relay.metered.ca:443?transport=tcp",
-      "turns:global.relay.metered.ca:443?transport=tcp",
-    ],
-    username: "a8d9d73530add1b926be15b7",
-    credential: "NgH88GxMUO1f4Knl",
-  });
-
-  return servers;
 }
 
+// Returns the cached list (or fallback if initIceConfig was never called)
+export function getIceServers() {
+  if (!_iceServers) {
+    console.warn("[ICE] getIceServers() called before initIceConfig() — using STUN-only fallback");
+    return STUN_ONLY_FALLBACK;
+  }
+  return _iceServers;
+}
+
+// ── Kept for backward compat — peer.js calls buildIceServers() ───────────
+export function buildIceServers() {
+  return getIceServers();
+}
+
+// ── Path detection (unchanged) ────────────────────────────────
 export function detectPathType(stats) {
   let pair = null;
   stats.forEach(r => {
@@ -62,14 +78,11 @@ export function detectPathType(stats) {
   else if (lt === "relay" || rt === "relay") pathType = "turn";
   else                                        pathType = "wan";
 
-  // ── Detect which TURN server is being used ──────────────────────────────
   if (pathType === "turn") {
     const relayUrl = local?.url || remote?.url || "";
-    if (relayUrl.includes("share.rumnnlg.com") || relayUrl.includes("128.199.28.210")) {
-      window._activeTurnServer = "digitalocean";
-    } else {
-      window._activeTurnServer = "metered";
-    }
+    window._activeTurnServer = (relayUrl.includes("share.rumnnlg.com") || relayUrl.includes("128.199.28.210"))
+      ? "digitalocean"
+      : "metered";
   }
 
   return {

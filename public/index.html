@@ -262,7 +262,9 @@
       pointer-events: auto;
     }
     #shareLinkPanel { transition-delay: 0s,   0s,   0s;   }
+    #membersPanel   { transition-delay: .04s, .04s, .04s; }
     #chatPanel      { transition-delay: .08s, .08s, .08s; }
+    #scorePanel     { transition-delay: .12s, .12s, .12s; }
     #filePanel      { transition-delay: .16s, .16s, .16s; }
 
     /* ================================================
@@ -705,6 +707,26 @@
             </div>
           </div>
 
+          <!-- ROOM MEMBERS PANEL — controlled by multiroom.js -->
+          <div class="reveal-panel" id="membersPanel">
+            <div class="g-card" id="roomMembersCard">
+              <div class="g-card-body">
+                <div class="section-label">&#128101; Room Members</div>
+                <div id="membersList"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- FILE ACCEPT SCOREBOARD — controlled by multiroom.js -->
+          <div class="reveal-panel" id="scorePanel">
+            <div class="g-card" id="fileScoreCard">
+              <div class="g-card-body">
+                <div class="section-label">&#128202; Transfer Status</div>
+                <div id="fileScoreList"></div>
+              </div>
+            </div>
+          </div>
+
           <!-- SHARE LINK PANEL -->
           <div class="reveal-panel" id="shareLinkPanel">
             <div class="g-card" id="shareLinkCard">
@@ -979,10 +1001,14 @@
       if (btn) btn.addEventListener('click', compactHero);
     });
 
+    /* multiroom.js panels — no interceptor needed, multiroom.js toggles
+       is-visible directly on #membersPanel / #scorePanel */
+
   });
 })();
 </script>
 
+<script src="multiroom.js"></script>
 <script src="script.js"></script>
 </body>
 </html>

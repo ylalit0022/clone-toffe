@@ -325,19 +325,40 @@ export function startReceiver(meta, writable) {
 export function handleIncomingChunk(buf, getDc) {
   if (!incomingFile) return;
 
+  // Guard: buf must be a non-empty ArrayBuffer
+  if (!(buf instanceof ArrayBuffer) || buf.byteLength === 0) {
+    tlog("handleIncomingChunk: skipping empty/invalid buffer");
+    return;
+  }
+
+  // FIX: Trim oversized final chunk instead of discarding.
+  // The old script.js had this guard; the refactored version lost it.
+  // Without it, the last chunk can push receivedBytes past meta.size →
+  // Blob assembled with extra bytes → corrupted file.
+  if (incomingFile.receivedBytes >= incomingFile.meta.size) {
+    tlog("handleIncomingChunk: chunk after EOF — ignoring");
+    return;
+  }
+  let writeBuf = buf;
+  if (incomingFile.receivedBytes + writeBuf.byteLength > incomingFile.meta.size) {
+    const allowed = incomingFile.meta.size - incomingFile.receivedBytes;
+    tlog("handleIncomingChunk: trimming oversized final chunk", { chunk: writeBuf.byteLength, allowed });
+    writeBuf = writeBuf.slice(0, allowed);
+  }
+
   // Disk mode: write at exact byte position (prevents offset drift)
   if (incomingFile.writable) {
     const pos    = incomingFile.receivedBytes;
     const ref    = incomingFile.writable;
-    const u8     = new Uint8Array(buf.slice(0));
+    const u8     = new Uint8Array(writeBuf.slice(0));
     incomingFile.writeChain = incomingFile.writeChain
       .then(() => ref.write({ type: "write", position: pos, data: u8 }))
       .catch(e  => tlog("disk write error at", pos, e));
   } else {
-    incomingFile.chunks.push(buf);
+    incomingFile.chunks.push(writeBuf.slice(0));
   }
 
-  incomingFile.receivedBytes += buf.byteLength;
+  incomingFile.receivedBytes += writeBuf.byteLength;
 
   // Progress
   UIEvents.onProgress(incomingFile.receivedBytes, incomingFile.meta.size);
@@ -392,7 +413,26 @@ async function finalizeReceive() {
       UIEvents.onDiskSave(meta.name, meta.size, meta.type, null);
     } else {
       const blob = new Blob(chunks, { type: meta.type });
+
+      // Sanity check: blob must match expected size exactly.
+      // A mismatch means chunks[] was assembled incompletely — better to
+      // report an error than silently save a truncated/corrupted file.
+      if (blob.size !== meta.size) {
+        tlog("BLOB SIZE MISMATCH", { blobSize: blob.size, metaSize: meta.size });
+        incomingFile = null;
+        UIEvents.onStatus("⚠️ File incomplete — please retry");
+        UIEvents.onError(`Received ${blob.size} bytes but expected ${meta.size} — file may be corrupt. Please retry.`);
+        return;
+      }
+
       const url  = URL.createObjectURL(blob);
+      // Auto-download immediately — no manual "Save" click needed
+      try {
+        const a = document.createElement("a");
+        a.href = url; a.download = meta.name; a.style.display = "none";
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      } catch(e) { tlog("auto-download click failed:", e); }
+
       UIEvents.onStatus(`✅ Received: ${meta.name}`);
       UIEvents.onDiskSave(meta.name, meta.size, meta.type, url);
     }

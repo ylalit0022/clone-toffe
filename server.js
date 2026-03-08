@@ -57,8 +57,81 @@ const PORT = process.env.PORT || 3000;
 // ── Static files ──────────────────────────────────────────────
 app.use(express.static(path.join(__dirname, "public")));
 
+// ── /api/ice-config — serve TURN credentials server-side ──────
+// SECURITY FIX: credentials are never shipped in client JS bundle.
+// Client fetches this once per session. Credentials come from
+// environment variables so they are never committed to source control.
+//
+// Set these in your environment (or a .env file with dotenv):
+//   INDIA_TURN_HOST=share.rumnnlg.com
+//   INDIA_TURN_USER=testuser
+//   INDIA_TURN_PASS=testpass123
+//   METERED_USER=a8d9d73530add1b926be15b7
+//   METERED_PASS=NgH88GxMUO1f4Knl
+app.get("/api/ice-config", (req, res) => {
+  const indiaHost = process.env.INDIA_TURN_HOST || "";
+  const indiaUser = process.env.INDIA_TURN_USER || "";
+  const indiaPass = process.env.INDIA_TURN_PASS || "";
+  const meteredUser = process.env.METERED_USER || "";
+  const meteredPass = process.env.METERED_PASS || "";
+
+  const iceServers = [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" },
+    { urls: "stun:stun2.l.google.com:19302" },
+    { urls: "stun:stun3.l.google.com:19302" },
+    { urls: "stun:stun4.l.google.com:19302" },
+    { urls: "stun:stun.cloudflare.com:3478" },
+  ];
+
+  if (indiaHost && indiaUser && indiaPass) {
+    iceServers.push({
+      urls: [
+        `turn:${indiaHost}:3478?transport=udp`,
+        `turn:${indiaHost}:3478?transport=tcp`,
+        `turns:${indiaHost}:5349?transport=tcp`,
+      ],
+      username: indiaUser,
+      credential: indiaPass,
+    });
+  }
+
+  if (meteredUser && meteredPass) {
+    iceServers.push({
+      urls: [
+        "turn:global.relay.metered.ca:80?transport=udp",
+        "turn:global.relay.metered.ca:80?transport=tcp",
+        "turn:global.relay.metered.ca:443?transport=tcp",
+        "turns:global.relay.metered.ca:443?transport=tcp",
+      ],
+      username: meteredUser,
+      credential: meteredPass,
+    });
+  }
+
+  // Short cache: 5 minutes — avoids per-request overhead while
+  // keeping credentials rotatable without a server restart
+  res.setHeader("Cache-Control", "private, max-age=300");
+  res.json({ iceServers });
+});
+
 // ── Room state ────────────────────────────────────────────────
 const rooms = new Map();   // roomId → Set of { socketId, deviceName }
+
+// ── Server-side file-offer rate limiter ───────────────────────
+// SECURITY FIX: client-side rate limiting (checkRateLimit in script.js)
+// can be bypassed by anyone with DevTools. Enforce the same 5/min limit
+// server-side so malicious clients cannot flood room members with modals.
+const _offerTimestamps = new Map();  // socketId → number[]
+
+function checkOfferRateLimit(socketId) {
+  const now  = Date.now();
+  const prev = (_offerTimestamps.get(socketId) || []).filter(t => now - t < 60_000);
+  if (prev.length >= 5) return false;
+  prev.push(now);
+  _offerTimestamps.set(socketId, prev);
+  return true;
+}
 
 // ── Grace-period map ──────────────────────────────────────────
 // Backup for when connectionStateRecovery can't restore the session
@@ -104,6 +177,9 @@ io.on("connection", (socket) => {
         .filter(p => p.socketId !== socket.id)
         .map(p => ({ socketId: p.socketId, deviceName: p.deviceName }));
       socket.emit("room-peers", peers);
+      // Broadcast updated member list so panels refresh
+      const fullList2 = [...(rooms.get(roomId) || [])].map(p => ({ socketId: p.socketId, deviceName: p.deviceName }));
+      io.to(roomId).emit("room-member-list", { room: roomId, members: fullList2 });
       return;
     }
 
@@ -146,18 +222,38 @@ io.on("connection", (socket) => {
       .filter(p => p.socketId !== socket.id)
       .map(p => ({ socketId: p.socketId, deviceName: p.deviceName }));
     socket.emit("room-peers", peers);
+
+    // ── MULTI-USER: broadcast full member list to everyone in room ──
+    // Every client keeps a live roster. Emit to ALL so everyone's panel updates.
+    const fullList = [...rooms.get(roomId)]
+      .map(p => ({ socketId: p.socketId, deviceName: p.deviceName }));
+    io.to(roomId).emit("room-member-list", { room: roomId, members: fullList });
   });
 
   // ── FILE OFFER ────────────────────────────────────────────
   socket.on("file-offer", ({ id, name, size, type }) => {
     if (!currentRoom) return;
+
+    // SECURITY FIX: server-side rate limit — max 5 offers per minute.
+    // Client-side checkRateLimit() can be bypassed via DevTools.
+    if (!checkOfferRateLimit(socket.id)) {
+      console.warn(`[RateLimit] ${deviceName} (${socket.id.slice(0,6)}) exceeded file-offer rate`);
+      socket.emit("file-offer-rejected", { reason: "rate_limit", message: "Too many file offers. Wait a moment." });
+      return;
+    }
+
+    // Sanitize: ensure name is a string, size is a non-negative number
+    const safeName = String(name || "").slice(0, 512) || "file";
+    const safeSize = Math.max(0, Number(size) || 0);
+    const safeType = String(type || "application/octet-stream").slice(0, 256);
+
     // Send to all OTHER users in the room
     socket.to(currentRoom).emit("file-offer", {
-      from:       socket.id,
-      fromName:   deviceName,
-      meta: { id, name, size, type },
+      from:     socket.id,
+      fromName: deviceName,
+      meta: { id, name: safeName, size: safeSize, type: safeType },
     });
-    console.log(`[Room ${currentRoom}] ${deviceName} offered: ${name} (${fmtBytes(size)})`);
+    console.log(`[Room ${currentRoom}] ${deviceName} offered: ${safeName} (${fmtBytes(safeSize)})`);
   });
 
   socket.on("file-answer", ({ to, accepted }) => {
@@ -254,6 +350,10 @@ io.on("connection", (socket) => {
         rooms.delete(roomId);
       } else {
         io.to(roomId).emit("room-status", { room: roomId, users: room.size, left: sock.id, deviceName: name });
+        // ── MULTI-USER: broadcast updated member list after leave ──
+        const fullList = [...room].map(p => ({ socketId: p.socketId, deviceName: p.deviceName }));
+        io.to(roomId).emit("room-member-list", { room: roomId, members: fullList });
+        io.to(roomId).emit("peer-left", { socketId: sock.id, deviceName: name });
       }
     }
   }

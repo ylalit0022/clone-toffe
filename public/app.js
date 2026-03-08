@@ -10,10 +10,16 @@
 import * as Peer     from "./peer.js";
 import * as Transfer from "./transfer.js";
 import { NET, applyProfile, detectAndApply } from "./net.js";
+import { initIceConfig } from "./ice.js";
 
 // ── Signaling ──────────────────────────────────────────────────────────────────
 const socket = io();
 window._signalingSocket = socket;   // peer.js reads this for ICE candidates
+
+// ── Fetch ICE config from server on startup ────────────────────────────────────
+// SECURITY FIX: credentials are served from server env vars, not hardcoded.
+// Must be called before any RTCPeerConnection is created.
+initIceConfig().catch(e => console.warn("[APP] ICE init failed:", e));
 
 // ── Worker reference (mutable so reconnect can update chunk size) ──────────────
 const workerRef = { current: null };
@@ -188,6 +194,14 @@ socket.on("file-answer", async ({ from, accepted }) => {
 
 socket.on("file-cancel", data => {
   cancelTransfer(`${data?.by || "Peer"} canceled`);
+});
+
+// ── Server-side rate limit feedback ───────────────────────────────────────────
+// Emitted by server when this socket exceeds 5 file-offers/minute.
+socket.on("file-offer-rejected", ({ message }) => {
+  uiLog(`⚠️ ${message || "File offer rejected by server."}`);
+  sending = false;
+  outgoingFile = null;
 });
 
 socket.on("room-status", ({ room, users }) => {

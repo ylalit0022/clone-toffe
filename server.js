@@ -265,6 +265,11 @@ io.on("connection", (socket) => {
     if (currentRoom) socket.to(currentRoom).emit("file-cancel", data);
   });
 
+  // Shared queue broadcast — sender tells all room members what's in their queue
+  socket.on("room-queue", (data) => {
+    if (currentRoom) socket.to(currentRoom).emit("room-queue", data);
+  });
+
   // ── WebRTC SIGNALING (relay only — no inspection) ─────────
   socket.on("webrtc-offer",  ({ to, sdp })       => io.to(to).emit("webrtc-offer",  { from: socket.id, sdp }));
   socket.on("webrtc-answer", ({ to, sdp })        => io.to(to).emit("webrtc-answer", { from: socket.id, sdp }));

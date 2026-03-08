@@ -700,6 +700,12 @@
                     <button class="btn-ghost w-100" id="createBtn">Create</button>
                     <button class="btn-em w-100"    id="joinBtn">Join &rarr;</button>
                   </div>
+                  <!-- Live camera QR scanner -->
+                  <div style="margin-top:8px;text-align:center;">
+                    <button onclick="openQrScanner()" style="background:none;border:none;padding:0;font-size:12px;color:var(--em);font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:5px;">
+                      <span>&#128247;</span><span>Scan QR to join</span>
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -744,6 +750,30 @@
                 <div class="d-flex align-items-stretch">
                   <input type="text" id="shareLinkInput" readonly placeholder="Generating link&hellip;" />
                   <button class="btn-em btn-sm-custom copy-attached flex-shrink-0" id="copyLinkBtn">&#128203; Copy</button>
+                </div>
+
+                <!-- QR code — shown automatically, with share + download actions -->
+                <div id="qrSection" style="margin-top:14px;">
+                  <!-- QR canvas renders here -->
+                  <div id="qrWrap" style="display:none;">
+                    <div style="display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap;">
+                      <!-- QR image -->
+                      <div id="qrCanvas" style="display:inline-block;border-radius:12px;border:1px solid var(--border);padding:10px;background:#fff;flex-shrink:0;"></div>
+                      <!-- Action buttons stacked beside QR -->
+                      <div style="display:flex;flex-direction:column;gap:8px;justify-content:center;min-width:120px;">
+                        <button id="qrDownloadBtn" onclick="downloadQr()" class="btn-ghost btn-sm-custom" style="font-size:12px;display:flex;align-items:center;gap:6px;">
+                          &#11015; Save QR
+                        </button>
+                        <button id="qrShareBtn" onclick="shareQr()" class="btn-em btn-sm-custom" style="font-size:12px;display:flex;align-items:center;gap:6px;">
+                          &#8599; Share
+                        </button>
+                        <button id="qrWhatsappBtn" onclick="shareWhatsapp()" style="background:#25D366;color:#fff;border:none;border-radius:var(--rXs);font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:12px;padding:8px 14px;cursor:pointer;display:flex;align-items:center;gap:6px;">
+                          &#128172; WhatsApp
+                        </button>
+                      </div>
+                    </div>
+                    <p style="font-size:12px;color:var(--muted);margin-top:8px;margin-bottom:0;">&#128241; Point phone camera at this code to join instantly</p>
+                  </div>
                 </div>
 
                 <div id="shareLinkHint" class="mt-2"
@@ -867,6 +897,53 @@
   </footer>
 
 </div><!-- /page-wrap -->
+
+<!-- QR SCANNER MODAL — live camera, like GPay/PhonePe -->
+<div id="qrScanModal" style="display:none;position:fixed;inset:0;background:rgba(17,24,39,.85);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);z-index:1060;align-items:center;justify-content:center;padding:16px;">
+  <div style="background:#fff;border-radius:20px;width:min(380px,100%);overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.3);position:relative;">
+    <!-- Header -->
+    <div style="padding:18px 20px 12px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);">
+      <div>
+        <div style="font-family:'Bricolage Grotesque',sans-serif;font-weight:800;font-size:16px;">&#128247; Scan QR Code</div>
+        <div style="font-size:12px;color:var(--muted);margin-top:2px;">Point camera at the room QR code</div>
+      </div>
+      <button onclick="closeQrScanner()" style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 10px;cursor:pointer;font-size:16px;line-height:1;">&#10005;</button>
+    </div>
+    <!-- Viewfinder -->
+    <div style="position:relative;background:#000;aspect-ratio:1/1;overflow:hidden;">
+      <video id="qrVideo" autoplay playsinline muted style="width:100%;height:100%;object-fit:cover;display:block;"></video>
+      <!-- Scanning overlay -->
+      <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;">
+        <div id="qrScanFrame" style="width:65%;aspect-ratio:1/1;position:relative;">
+          <!-- Corner brackets -->
+          <div style="position:absolute;top:0;left:0;width:22px;height:22px;border-top:3px solid #fff;border-left:3px solid #fff;border-radius:4px 0 0 0;"></div>
+          <div style="position:absolute;top:0;right:0;width:22px;height:22px;border-top:3px solid #fff;border-right:3px solid #fff;border-radius:0 4px 0 0;"></div>
+          <div style="position:absolute;bottom:0;left:0;width:22px;height:22px;border-bottom:3px solid #fff;border-left:3px solid #fff;border-radius:0 0 0 4px;"></div>
+          <div style="position:absolute;bottom:0;right:0;width:22px;height:22px;border-bottom:3px solid #fff;border-right:3px solid #fff;border-radius:0 0 4px 0;"></div>
+          <!-- Scan line animation -->
+          <div id="qrScanLine" style="position:absolute;left:4px;right:4px;height:2px;background:linear-gradient(90deg,transparent,var(--em),transparent);animation:qrScan 2s ease-in-out infinite;top:0;"></div>
+        </div>
+      </div>
+      <!-- Status message -->
+      <div id="qrScanStatus" style="position:absolute;bottom:0;left:0;right:0;background:linear-gradient(transparent,rgba(0,0,0,.7));padding:20px 16px 12px;color:#fff;font-size:13px;font-weight:600;text-align:center;">Scanning…</div>
+    </div>
+    <!-- Fallback: upload image -->
+    <div style="padding:14px 20px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:10px;">
+      <span style="font-size:12px;color:var(--muted);">Can't use camera?</span>
+      <label style="font-size:12px;color:var(--em);font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:5px;white-space:nowrap;">
+        &#128247; Upload QR image
+        <input type="file" accept="image/*" style="display:none;" onchange="handleQrImageUpload(this)" />
+      </label>
+    </div>
+  </div>
+</div>
+<style>
+@keyframes qrScan {
+  0%   { top: 4px;   opacity: 1; }
+  50%  { top: calc(100% - 6px); opacity: 1; }
+  100% { top: 4px;   opacity: 1; }
+}
+</style>
 
 <!-- INCOMING FILE MODAL -->
 <div id="modalBg">
@@ -1006,6 +1083,293 @@
 
   });
 })();
+</script>
+
+<!-- QR Code library (qrcodejs) + jsQR for scanning -->
+<script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+
+<!-- Service Worker registration -->
+<script>
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js', { scope: '/' })
+    .then(function(reg) { console.log('[SW] Registered:', reg.scope); })
+    .catch(function(e)  { console.warn('[SW] Registration failed:', e.message); });
+}
+</script>
+
+<!-- QR: creator-side render + share + download + receiver live scanner -->
+<script>
+// ─── State ────────────────────────────────────────────────────────────────────
+var _qrInstance   = null;
+var _qrCurrentUrl = '';
+var _scanStream   = null;
+var _scanRaf      = null;
+var _scanCanvas   = document.createElement('canvas');
+var _scanCtx      = _scanCanvas.getContext('2d');
+
+// ─── CREATOR: render QR automatically when share link is set ─────────────────
+window.__onShareLinkSet = function(url) {
+  _qrCurrentUrl = url;
+  var wrap = document.getElementById('qrWrap');
+  var div  = document.getElementById('qrCanvas');
+  if (!wrap || !div) return;
+  // Clear old instance
+  div.innerHTML = '';
+  _qrInstance = null;
+
+  function doRender() {
+    if (typeof QRCode === 'undefined') { setTimeout(doRender, 200); return; }
+    try {
+      _qrInstance = new QRCode(div, {
+        text:         url,
+        width:        180,
+        height:       180,
+        colorDark:    '#111827',
+        colorLight:   '#ffffff',
+        correctLevel: QRCode.CorrectLevel.M
+      });
+      wrap.style.display = 'block';
+    } catch(e) { console.warn('[QR] render error:', e); }
+  }
+  doRender();
+};
+
+// Get the rendered QR as a PNG data-URL
+function _getQrDataUrl() {
+  var div = document.getElementById('qrCanvas');
+  if (!div) return null;
+  var img    = div.querySelector('img');
+  var canvas = div.querySelector('canvas');
+  if (canvas) return canvas.toDataURL('image/png');
+  if (img && img.src) return img.src;
+  return null;
+}
+
+// ─── DOWNLOAD QR ─────────────────────────────────────────────────────────────
+function downloadQr() {
+  var data = _getQrDataUrl();
+  if (!data) { console.warn('[QR] nothing to download yet'); return; }
+  var a = document.createElement('a');
+  a.href     = data;
+  a.download = 'tranzo-room-qr.png';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+// ─── SHARE QR (Web Share API — WhatsApp, FB, Instagram, etc.) ────────────────
+function shareQr() {
+  var url  = _qrCurrentUrl;
+  var data = _getQrDataUrl();
+  if (!url) return;
+
+  // Try Web Share API with file (image) — supported on Android Chrome / iOS Safari
+  if (navigator.share && data) {
+    fetch(data)
+      .then(function(r) { return r.blob(); })
+      .then(function(blob) {
+        var file = new File([blob], 'tranzo-room-qr.png', { type: 'image/png' });
+        if (navigator.canShare && navigator.canShare({ files: [file] })) {
+          return navigator.share({
+            title: 'Join my Tranzo room',
+            text:  'Scan this QR or tap the link to join my file transfer room',
+            url:   url,
+            files: [file]
+          });
+        } else {
+          // Share URL only (no file)
+          return navigator.share({ title: 'Join my Tranzo room', text: 'Tap to join my file transfer room', url: url });
+        }
+      })
+      .catch(function(e) { if (e.name !== 'AbortError') console.warn('[QR] share error:', e); });
+    return;
+  }
+
+  // Fallback: share URL only
+  if (navigator.share) {
+    navigator.share({ title: 'Join my Tranzo room', url: url }).catch(function() {});
+    return;
+  }
+
+  // Last resort: copy to clipboard
+  navigator.clipboard.writeText(url).then(function() {
+    var btn = document.getElementById('qrShareBtn');
+    if (btn) { btn.innerHTML = '&#10003; Link copied!'; setTimeout(function() { btn.innerHTML = '&#8599; Share'; }, 2000); }
+  }).catch(function() {});
+}
+
+// ─── WHATSAPP SHARE ──────────────────────────────────────────────────────────
+function shareWhatsapp() {
+  var url = _qrCurrentUrl;
+  if (!url) return;
+  var text = encodeURIComponent('Join my Tranzo file transfer room: ' + url);
+  window.open('https://api.whatsapp.com/send?text=' + text, '_blank');
+}
+
+// ─── RECEIVER: live camera QR scanner ────────────────────────────────────────
+function openQrScanner() {
+  var modal = document.getElementById('qrScanModal');
+  if (!modal) return;
+  modal.style.display = 'flex';
+  _startCamera();
+}
+
+function closeQrScanner() {
+  _stopCamera();
+  var modal = document.getElementById('qrScanModal');
+  if (modal) modal.style.display = 'none';
+  _setScanStatus('Scanning\u2026', false);
+}
+
+function _startCamera() {
+  var video  = document.getElementById('qrVideo');
+  var status = document.getElementById('qrScanStatus');
+  if (!video) return;
+
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    _setScanStatus('Camera not available on this browser', true);
+    return;
+  }
+
+  navigator.mediaDevices.getUserMedia({
+    video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 640 } }
+  }).then(function(stream) {
+    _scanStream = stream;
+    video.srcObject = stream;
+    video.play();
+    video.addEventListener('loadedmetadata', function() {
+      _scanCanvas.width  = video.videoWidth  || 640;
+      _scanCanvas.height = video.videoHeight || 640;
+      _scanFrame();
+    }, { once: true });
+  }).catch(function(err) {
+    console.warn('[QR Scanner]', err);
+    var msg = err.name === 'NotAllowedError'
+      ? 'Camera permission denied. Upload an image instead.'
+      : 'Camera unavailable. Upload an image instead.';
+    _setScanStatus(msg, true);
+  });
+}
+
+function _stopCamera() {
+  if (_scanRaf) { cancelAnimationFrame(_scanRaf); _scanRaf = null; }
+  if (_scanStream) {
+    _scanStream.getTracks().forEach(function(t) { t.stop(); });
+    _scanStream = null;
+  }
+  var video = document.getElementById('qrVideo');
+  if (video) { video.srcObject = null; }
+}
+
+function _scanFrame() {
+  var video = document.getElementById('qrVideo');
+  if (!video || !_scanStream) return;
+
+  if (video.readyState === video.HAVE_ENOUGH_DATA) {
+    _scanCtx.drawImage(video, 0, 0, _scanCanvas.width, _scanCanvas.height);
+    var imageData = _scanCtx.getImageData(0, 0, _scanCanvas.width, _scanCanvas.height);
+
+    // jsQR may not be loaded yet — wait for it
+    if (typeof jsQR !== 'undefined') {
+      var code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'dontInvert' });
+      if (code && code.data) {
+        _onQrDetected(code.data);
+        return;   // stop scanning
+      }
+    }
+  }
+  _scanRaf = requestAnimationFrame(_scanFrame);
+}
+
+function _onQrDetected(data) {
+  // Visual feedback
+  var frame = document.getElementById('qrScanFrame');
+  if (frame) {
+    frame.style.transition = 'outline .2s';
+    frame.style.outline = '3px solid var(--em)';
+  }
+  _setScanStatus('&#10003; QR detected — joining room…', false);
+
+  // Extract room param
+  var room = data;
+  try {
+    var u = new URL(data);
+    var r = u.searchParams.get('room');
+    if (r) room = r;
+  } catch {}
+
+  // Stop camera and close modal after short success delay
+  setTimeout(function() {
+    _stopCamera();
+    var modal = document.getElementById('qrScanModal');
+    if (modal) modal.style.display = 'none';
+
+    // Fill room input and join
+    var roomInput = document.getElementById('roomId');
+    if (roomInput) {
+      roomInput.value = room;
+      roomInput.dispatchEvent(new Event('input'));
+    }
+
+    // If mode=download was in the URL, set auto-accept
+    try {
+      var u2 = new URL(data);
+      if (u2.searchParams.get('mode') === 'download') {
+        try { sessionStorage.setItem('autoAccept:' + room, '1'); } catch {}
+      }
+    } catch {}
+
+    var joinBtn = document.getElementById('joinBtn');
+    if (joinBtn) joinBtn.click();
+
+    _setScanStatus('Scanning\u2026', false);
+    if (frame) { frame.style.outline = ''; }
+  }, 600);
+}
+
+function _setScanStatus(msg, isError) {
+  var el = document.getElementById('qrScanStatus');
+  if (!el) return;
+  el.innerHTML = msg;
+  el.style.color = isError ? '#FCA5A5' : '#fff';
+}
+
+// ─── FALLBACK: upload image ──────────────────────────────────────────────────
+function handleQrImageUpload(input) {
+  var file = input && input.files && input.files[0];
+  if (!file) return;
+
+  var reader = new FileReader();
+  reader.onload = function(e) {
+    var img = new Image();
+    img.onload = function() {
+      var c = document.createElement('canvas');
+      c.width = img.width; c.height = img.height;
+      var ctx = c.getContext('2d');
+      ctx.drawImage(img, 0, 0);
+      var imageData = ctx.getImageData(0, 0, c.width, c.height);
+
+      if (typeof jsQR === 'undefined') {
+        _setScanStatus('Scanner loading, please wait…', false);
+        setTimeout(function() { handleQrImageUpload(input); }, 400);
+        return;
+      }
+
+      var code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'dontInvert' });
+      if (!code) {
+        _setScanStatus('&#10060; No QR found in image — try another', true);
+        setTimeout(function() { _setScanStatus('Scanning\u2026', false); }, 2500);
+        input.value = '';
+        return;
+      }
+      input.value = '';
+      _onQrDetected(code.data);
+    };
+    img.src = e.target.result;
+  };
+  reader.readAsDataURL(file);
+}
 </script>
 
 <script src="multiroom.js"></script>

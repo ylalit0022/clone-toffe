@@ -40,6 +40,7 @@
 
   var _offerStatus = new Map(); // offerId → { fileName, fileSize, senderName, peers, ts }
   var _soloFirstDone = {};      // roomId → boolean — reset on room change (FIX-9)
+  var _sharedQueue   = [];      // [{ name, size }] — broadcast by sender, shown to all
 
   // ── DOM ──────────────────────────────────────────────────────────────────────
   var membersPanel = document.getElementById("membersPanel");
@@ -161,8 +162,21 @@
       leftHtml += '</div>';
     }
 
-    membersList.innerHTML = statsHtml + pillsHtml + leftHtml;
-  }
+    // Shared queue — shown to all members so everyone sees what's queued
+    var queueHtml = "";
+    if (_sharedQueue && _sharedQueue.length > 0) {
+      queueHtml = '<div style="margin-top:12px;">'
+        + '<div style="font-family:\'Space Grotesk\',sans-serif;font-size:11px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;color:var(--muted2);margin-bottom:6px;">📦 Pending queue (' + _sharedQueue.length + ')</div>'
+        + '<div style="display:flex;flex-wrap:wrap;gap:4px;">';
+      _sharedQueue.forEach(function(f, i) {
+        queueHtml += '<span style="font-size:12px;padding:3px 10px;border-radius:999px;background:var(--ambLight);color:var(--ambDark);border:1px solid var(--borderAmb);font-family:\'Space Grotesk\',sans-serif;font-weight:600;">'
+          + (i + 1) + '. ' + escHtml(f.name) + ' <span style="opacity:.65;">' + fmtBytesLocal(f.size) + '</span></span>';
+      });
+      queueHtml += '</div></div>';
+    }
+
+    membersList.innerHTML = statsHtml + pillsHtml + leftHtml + queueHtml;
+  }  // end renderMembers
 
   // ── Render score panel ───────────────────────────────────────────────────────
   function renderScore() {
@@ -384,8 +398,20 @@
       if (e.target && e.target.id === "acceptBtn") markSoloFirstDone();
     }, true);
 
-  });
+    // ── Shared file queue (visible to all room members) ─────────────────────
+    sock.on("room-queue", function(payload) {
+      _sharedQueue = Array.isArray(payload.queue) ? payload.queue : [];
+      renderMembers();
+    });
 
+    // Expose so script.js can call window.multiroomBroadcastQueue(queue)
+    window.multiroomBroadcastQueue = function(queue) {
+      try { sock.emit("room-queue", { queue: queue || [] }); } catch {}
+      _sharedQueue = queue || [];
+      renderMembers();
+    };
+
+  });  // end waitForSocket
   // Expose for script.js
   window.multiroomGetShouldShowModal = function () { return window.__mrShouldShowModal !== false; };
 

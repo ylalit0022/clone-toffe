@@ -49,12 +49,42 @@ let canceled    = false;
 let reading     = false;   // true while a read Promise is in flight
 let pullQueue   = 0;       // pending pull requests not yet started
 
+// ── SHA-256 streaming hash ─────────────────────────────────────────────────
+// We keep a copy of each chunk buffer (before zero-copy transfer) and
+// compute the full-file SHA-256 via SubtleCrypto when done fires.
+// Reset on start/seek so a resumed transfer hashes only sent bytes.
+let _hashBufs    = [];
+let _hashEnabled = typeof crypto !== "undefined" && !!crypto.subtle;
+
+// Compute SHA-256 over all accumulated hash buffers, then post done.
+// Falls back to posting done immediately if SubtleCrypto is unavailable.
+async function _finalizeDone() {
+  if (!_hashEnabled || _hashBufs.length === 0) {
+    self.postMessage({ type: "done" });
+    return;
+  }
+  try {
+    // Concatenate all chunk buffers into one ArrayBuffer
+    const total = _hashBufs.reduce((s, b) => s + b.byteLength, 0);
+    const merged = new Uint8Array(total);
+    let pos = 0;
+    for (const b of _hashBufs) { merged.set(new Uint8Array(b), pos); pos += b.byteLength; }
+    const hashBuf = await crypto.subtle.digest("SHA-256", merged);
+    const hashHex = Array.from(new Uint8Array(hashBuf)).map(b => b.toString(16).padStart(2, "0")).join("");
+    self.postMessage({ type: "done", sha256: hashHex });
+  } catch {
+    self.postMessage({ type: "done" });
+  } finally {
+    _hashBufs = [];
+  }
+}
+
 function readNext() {
   if (reading || paused || canceled || !file) return;
   if (pullQueue <= 0) return;
   if (offset >= file.size) {
     pullQueue = 0;
-    self.postMessage({ type: "done" });
+    _finalizeDone();
     return;
   }
 
@@ -83,6 +113,9 @@ function readNext() {
       }
 
       // Transfer buffer ownership (zero-copy postMessage)
+      // Keep a copy for SHA-256 before transferring ownership
+      if (_hashEnabled) _hashBufs.push(buf.slice(0));
+
       self.postMessage(
         { type: "chunk", buf, index: readIndex, offset: readOffset },
         [buf]
@@ -90,7 +123,7 @@ function readNext() {
 
       // Signal done if this was the last chunk
       if (offset >= file.size && pullQueue === 0) {
-        self.postMessage({ type: "done" });
+        _finalizeDone();
       } else {
         readNext();
       }
@@ -116,6 +149,7 @@ self.onmessage = e => {
       canceled   = false;
       reading    = false;
       pullQueue  = 0;
+      _hashBufs  = [];
       break;
 
     case "pull":
@@ -134,6 +168,7 @@ self.onmessage = e => {
       chunkIndex = msg.chunkIndex ?? chunkIndex;
       reading    = false;   // abandon any in-flight read — result will be ignored
       pullQueue  = 0;       // clear stale pulls; caller will re-seed after seek
+      _hashBufs  = [];      // restart hash from this offset
       break;
 
     case "resize":

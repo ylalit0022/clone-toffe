@@ -114,57 +114,57 @@ document.addEventListener("visibilitychange", () => {
 const IS_MOBILE = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 
 // ─── TURN / ICE CONFIG ────────────────────────────────────────────────────────
-// Set your India TURN credentials here
-const INDIA_TURN_HOST = "share.rumnnlg.com";
-const INDIA_TURN_USER = "testuser";
-const INDIA_TURN_PASS = "testpass123";
+// Credentials are fetched from /api/ice-config (server reads from env vars).
+// buildIceServers() returns STUN-only until the fetch completes — safe because
+// createPeerConnection always calls getIceServers() not buildIceServers().
+let _iceServers = null;
 
-function buildIceServers() {
-  const servers = [
-    // Priority 1: STUN (direct P2P — fastest on LAN + open NAT)
-    { urls: "stun:stun.l.google.com:19302" },
-    { urls: "stun:stun1.l.google.com:19302" },
-    { urls: "stun:stun2.l.google.com:19302" },
-    { urls: "stun:stun3.l.google.com:19302" },
-    { urls: "stun:stun4.l.google.com:19302" },
-    { urls: "stun:stun.cloudflare.com:3478" },
-  ];
-  // Priority 2: India TURN (low latency relay for India users)
-  if (INDIA_TURN_HOST && INDIA_TURN_USER && INDIA_TURN_PASS) {
-    servers.push({
-      urls: [
-        `turn:${INDIA_TURN_HOST}:3478?transport=udp`,
-        `turn:${INDIA_TURN_HOST}:3478?transport=tcp`,
-        `turns:${INDIA_TURN_HOST}:5349?transport=tcp`,
-      ],
-      username: INDIA_TURN_USER,
-      credential: INDIA_TURN_PASS,
-    });
-    console.log("[P2P] India TURN configured:", INDIA_TURN_HOST);
-  } else {
-    console.warn("[P2P] No India TURN configured — WAN will use Metered. See INDIA_TURN_HOST.");
+const STUN_ONLY = [
+  { urls: "stun:stun.l.google.com:19302" },
+  { urls: "stun:stun1.l.google.com:19302" },
+  { urls: "stun:stun.cloudflare.com:3478" },
+];
+
+async function initIceConfig() {
+  if (_iceServers) return;
+  try {
+    const res = await fetch("/api/ice-config", { credentials: "same-origin" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (Array.isArray(data.iceServers) && data.iceServers.length > 0) {
+      _iceServers = data.iceServers;
+      console.log("[ICE] Config loaded —", _iceServers.length, "servers");
+    } else throw new Error("Empty");
+  } catch(e) {
+    console.warn("[ICE] Fetch failed — STUN-only fallback:", e.message);
+    _iceServers = STUN_ONLY;
   }
-  // Priority 3: Metered global TURN (final fallback)
-  servers.push({
-    urls: [
-      "turn:global.relay.metered.ca:80?transport=udp",
-      "turn:global.relay.metered.ca:80?transport=tcp",
-      "turn:global.relay.metered.ca:443?transport=tcp",
-      "turns:global.relay.metered.ca:443?transport=tcp",
-    ],
-    username: "a8d9d73530add1b926be15b7",
-    credential: "NgH88GxMUO1f4Knl",
-  });
-  return servers;
 }
+function getIceServers() { return _iceServers || STUN_ONLY; }
+// Legacy alias kept for any module that calls buildIceServers()
+function buildIceServers() { return getIceServers(); }
 
+// Kick off fetch immediately (non-blocking)
+initIceConfig();
+
+// RTC_CONFIG is a getter so every new RTCPeerConnection picks up the
+// latest ice servers (fetched from /api/ice-config on startup).
+function getRtcConfig() {
+  return {
+    iceServers: getIceServers(),
+    iceTransportPolicy: "all",
+    bundlePolicy: "max-bundle",
+    rtcpMuxPolicy: "require",
+    iceCandidatePoolSize: 4,
+  };
+}
+// Keep legacy name for any code that references RTC_CONFIG directly
 const RTC_CONFIG = {
-  iceServers: buildIceServers(),
-  iceTransportPolicy: "all",
-  bundlePolicy: "max-bundle",
-  rtcpMuxPolicy: "require",
-  // ICE candidate priority: host > srflx > relay
-  iceCandidatePoolSize: 4,
+  get iceServers()         { return getIceServers(); },
+  iceTransportPolicy:      "all",
+  bundlePolicy:            "max-bundle",
+  rtcpMuxPolicy:           "require",
+  iceCandidatePoolSize:    4,
 };
 
 // ─── ADAPTIVE NETWORK PROFILE ─────────────────────────────────────────────────
@@ -479,6 +479,7 @@ let sendState = {
   gotComplete: false,
   chunkIndex: 0,        // for retransmit tracking
   pendingRetransmits: new Map(), // index → buf
+  knownPeers: new Set(),  // socketIds that opened a DC for this transfer (reconnect detection)
 };
 
 // Receiver state
@@ -530,10 +531,24 @@ const rejectBtn     = document.getElementById("rejectBtn");
 // Drag & drop
 setTimeout(() => { try { enableDragDrop(); } catch {} }, 0);
 
-// ─── QUEUE / HISTORY ─────────────────────────────────────────────────────────
+// ─── QUEUE / HISTORY ─────────────────────────────────────────
+// sentHistory and recvHistory are persisted to localStorage so they
+// survive page reloads. We keep the last 50 entries per list.
+const HISTORY_KEY_SENT = "tranzo:sentHistory";
+const HISTORY_KEY_RECV = "tranzo:recvHistory";
+const HISTORY_MAX      = 50;
+
+function _loadHistory(key) {
+  try { return JSON.parse(localStorage.getItem(key) || "[]"); } catch { return []; }
+}
+function _saveHistory(key, arr) {
+  try { localStorage.setItem(key, JSON.stringify(arr.slice(-HISTORY_MAX))); } catch {}
+}
+
 let queueWrap = null, queueListEl = null, queueCountEl = null;
 let recvQueueWrap = null, recvQueueListEl = null, recvQueueCountEl = null;
-const sentHistory = [], recvHistory = [];
+const sentHistory = _loadHistory(HISTORY_KEY_SENT);
+const recvHistory = _loadHistory(HISTORY_KEY_RECV);
 let autoAcceptThisRoom = false;
 
 function autoAcceptKey() { return `autoAccept:${currentRoom || ""}`; }
@@ -547,6 +562,7 @@ function upsertSentItem(id, name, size, state, done = 0, total = size || 0) {
   it.name = name; it.size = size; it.state = state;
   it.done = Math.max(it.done || 0, done || 0);
   it.total = total || it.total || size || 0;
+  _saveHistory(HISTORY_KEY_SENT, sentHistory);
   return it;
 }
 function upsertRecvItem(id, name, size, state, done = 0, total = size || 0) {
@@ -556,6 +572,7 @@ function upsertRecvItem(id, name, size, state, done = 0, total = size || 0) {
   it.name = name; it.size = size; it.state = state;
   it.done = Math.max(it.done || 0, done || 0);
   it.total = total || it.total || size || 0;
+  _saveHistory(HISTORY_KEY_RECV, recvHistory);
   return it;
 }
 
@@ -717,6 +734,38 @@ typingLine.className = "typingLine"; typingLine.style.display = "none";
 if (chatSection) chatSection.appendChild(typingLine);
 function showTyping(text) { typingLine.innerText = text; typingLine.style.display = text ? "block" : "none"; }
 
+// ─── BROWSER NOTIFICATIONS ───────────────────────────────────────────────────
+// Request permission once when the user first joins a room (requires gesture).
+// We fire a notification when a file offer arrives while the tab is hidden.
+let _notifPermission = (typeof Notification !== "undefined") ? Notification.permission : "denied";
+
+function requestNotifPermission() {
+  if (typeof Notification === "undefined") return;
+  if (_notifPermission === "granted") return;
+  // Must be called from a user gesture (joinBtn / createBtn click)
+  Notification.requestPermission().then(p => { _notifPermission = p; });
+}
+
+function showFileOfferNotif(who, fileName, fileSize) {
+  // Re-check permission fresh (may have been granted this session)
+  const perm = (typeof Notification !== "undefined") ? Notification.permission : "denied";
+  if (perm !== "granted") return;
+  // Fire when tab is hidden OR document is not focused
+  const tabHidden   = document.visibilityState !== "visible";
+  const notFocused  = !document.hasFocus();
+  if (!tabHidden && !notFocused) return;   // fully in focus — modal is enough
+  try {
+    const n = new Notification("📥 Incoming file — Tranzo", {
+      body: `${who} wants to send you ${fileName} (${fmtBytes(fileSize)})`,
+      icon: "/favicon.ico",
+      tag:  "tranzo-file-offer",   // replace previous if another arrives quickly
+      requireInteraction: true,    // stay visible until user dismisses on mobile
+    });
+    // Clicking the notification focuses the tab and shows the modal
+    n.onclick = () => { window.focus(); n.close(); };
+  } catch {}
+}
+
 // ─── DEVICE NAME ──────────────────────────────────────────────────────────────
 function defaultDeviceName() {
   const ua = navigator.userAgent || "";
@@ -744,8 +793,11 @@ function generateShareLink(roomId) {
 
 function showShareLink(roomId) {
   if (!shareLinkCard || !shareLinkInput) return;
-  shareLinkInput.value = generateShareLink(roomId);
+  const url = generateShareLink(roomId);
+  shareLinkInput.value = url;
   shareLinkCard.style.display = "block";
+  // Notify QR renderer that the link is set
+  try { if (typeof window.__onShareLinkSet === "function") window.__onShareLinkSet(url); } catch {}
 }
 
 function hideShareLink() {
@@ -805,6 +857,7 @@ if (copyLinkBtn) {
 // ─── ROOM ─────────────────────────────────────────────────────────────────────
 function joinRoom(roomId, mode) {
   currentRoom = roomId;
+  _openBroadcastChannel(roomId);   // open BC channel for same-device fallback
   loadAutoAcceptFlag();
   socket.emit("join-room", { roomId, deviceName: getDeviceName() });
   chatSection.style.display = "block";
@@ -818,8 +871,8 @@ function joinRoom(roomId, mode) {
     hideShareLink();
   }
 }
-createBtn.onclick = () => { const id = Math.random().toString(36).slice(2, 8).toUpperCase(); roomInput.value = id; joinRoom(id, "create"); };
-joinBtn.onclick   = () => { const r = roomInput.value.trim(); if (r) joinRoom(r, "join"); };
+createBtn.onclick = () => { requestNotifPermission(); const id = Math.random().toString(36).slice(2, 8).toUpperCase(); roomInput.value = id; joinRoom(id, "create"); };
+joinBtn.onclick   = () => { requestNotifPermission(); const r = roomInput.value.trim(); if (r) joinRoom(r, "join"); };
 socket.on("room-status", ({ room, users }) => {
   if (room !== currentRoom) return;
   if (users >= 2) { setConnectedUI(true, "Connected", `Room: ${room} — ${users} user${users>2?"s":""} connected`); addMsg(`<span class="muted">✅ ${users} users in room.</span>`); }
@@ -830,7 +883,58 @@ socket.on("room-status", ({ room, users }) => {
 // Handled by multiroom.js (renderMemberPanel). Nothing to do here.
 socket.on("room-peers", () => {});
 
-// ─── CHAT ─────────────────────────────────────────────────────────────────────
+// ─── BROADCASTCHANNEL FALLBACK SIGNALING ─────────────────────────────────────
+// When both peers are on the same device (or same browser profile), Socket.IO
+// goes through the server even though the peers are literally the same machine.
+// BroadcastChannel is a same-origin, zero-latency inter-tab message bus.
+//
+// How it works:
+//   - Both tabs open the same BroadcastChannel name ("tranzo-signal:<roomId>").
+//   - When we emit webrtc-offer/answer/ice via socket, we ALSO broadcast on BC.
+//   - On receiving a BC message we check if we already handled it via socket
+//     (using a seen-set) to avoid double-processing.
+//   - If the socket is disconnected, BC still works → same-device transfers
+//     survive a server blip.
+//
+// BroadcastChannel is supported in all modern browsers (Chrome 54+, FF 38+,
+// Safari 15.4+). Older browsers silently skip (try/catch guard).
+
+let _bc = null;
+const _bcSeen = new Set();   // deduplicate messages received on both channels
+
+function _openBroadcastChannel(roomId) {
+  try {
+    if (_bc) { try { _bc.close(); } catch {} }
+    _bc = new BroadcastChannel(`tranzo-signal:${roomId}`);
+    _bc.onmessage = e => {
+      const msg = e.data;
+      if (!msg || !msg._bcId) return;
+      if (_bcSeen.has(msg._bcId)) return;  // already handled via socket
+      _bcSeen.add(msg._bcId);
+      // Route as if it came from the socket
+      if (msg.type === "webrtc-offer")  socket.emit("__bc_route", msg);
+      else if (msg.type === "webrtc-answer") socket.emit("__bc_route", msg);
+      else if (msg.type === "webrtc-ice")    socket.emit("__bc_route", msg);
+      // Directly dispatch to our handlers
+      if (msg.type === "webrtc-offer")  _handleWebrtcOffer(msg);
+      else if (msg.type === "webrtc-answer") _handleWebrtcAnswer(msg);
+      else if (msg.type === "webrtc-ice")    _handleWebrtcIce(msg);
+    };
+    dlog("[BC] Opened channel for room:", roomId);
+  } catch(e) { dlog("[BC] BroadcastChannel not supported:", e.message); _bc = null; }
+}
+
+function _bcBroadcast(msg) {
+  if (!_bc) return;
+  try {
+    const id = `${msg.type}-${Date.now()}-${Math.random()}`;
+    _bcSeen.add(id);   // mark as seen so we don't re-process our own
+    _bc.postMessage({ ...msg, _bcId: id });
+  } catch {}
+}
+
+// Open BC channel when room is joined
+const _origJoinRoom = joinRoom;  // patch below after joinRoom is defined
 let typingTimer = null;
 messageInput?.addEventListener("input", () => {
   socket.emit("typing", { roomId: currentRoom, user: getDeviceName() });
@@ -921,6 +1025,8 @@ function enqueueFilesForSend(files) {
     addMsg(`<span class="muted">📤 Selected: ${file.name} (${fmtBytes(file.size)})</span>`);
   });
   try { renderQueueUI(sending ? outgoingFile : null); } catch {}
+  // Broadcast the queue to all room members
+  try { if (typeof window.multiroomBroadcastQueue === "function") window.multiroomBroadcastQueue(fileQueue.map(f => ({ name: f.name, size: f.size }))); } catch {}
   startNextFile();
 }
 
@@ -1012,7 +1118,11 @@ async function createPeerConnectionFor(socketId) {
   };
 
   pc.onicecandidate = e => {
-    if (e.candidate) socket.emit("webrtc-ice", { to: socketId, candidate: e.candidate });
+    if (e.candidate) {
+      const sigMsg = { to: socketId, candidate: e.candidate };
+      socket.emit("webrtc-ice", sigMsg);
+      _bcBroadcast({ type: "webrtc-ice", from: socket.id, ...sigMsg });
+    }
     else dlog("ICE gathering complete for", socketId);
   };
   pc.onicecandidateerror = e => dlog("ICE candidate error:", e?.errorCode, e?.errorText);
@@ -1089,30 +1199,55 @@ function setupDataChannelFor(socketId, channel, gen) {
     _clearIceFailTimer(socketId);
 
     if (sendState.running && !sendState.canceled) {
-      // ── RECONNECT path: transfer already in progress ─────────────────────
-      dlog("DC reopened mid-transfer — offset", sendState.offset);
-      addMsg(`<span class="muted">🔄 Reconnected — resuming from ${fmtBytes(sendState.offset)}</span>`);
+      // ── Distinguish reconnect vs late-joining new peer ───────────────────
+      // A RECONNECT: this socketId already opened a DC for this transfer before.
+      //   → send resume-offset so receiver confirms its byte count, then resume.
+      // A LATE JOIN: new peer that accepted the offer after sendFile() started.
+      //   → send meta so they initialize, wait for "ready", then they receive
+      //     from the current offset onward via broadcastChunk. Do NOT reset
+      //     sendState.offset (that would restart the transfer for everyone).
+      const isReconnect = sendState.knownPeers.has(socketId);
 
-      // Reset drain state on the new channel (clears waitingDrain + loopRunning)
-      if (typeof sendState._onReconnect === "function") {
-        sendState._onReconnect(channel);
+      if (isReconnect) {
+        // ── RECONNECT path ─────────────────────────────────────────────────
+        dlog("DC reopened mid-transfer (reconnect) — offset", sendState.offset);
+        addMsg(`<span class="muted">🔄 Reconnected — resuming from ${fmtBytes(sendState.offset)}</span>`);
+
+        if (typeof sendState._onReconnect === "function") {
+          sendState._onReconnect(channel);
+        }
+        try {
+          channel.send(JSON.stringify({ type: "resume-offset", offset: sendState.offset }));
+          dlog("sent resume-offset request to receiver");
+        } catch(e) { dlog("resume-offset send failed:", e); }
+
+      } else {
+        // ── LATE JOIN path ──────────────────────────────────────────────────
+        // New peer accepted the offer after the transfer started.
+        // Send them meta so they set up incomingFile, then they'll send "ready".
+        // They join the broadcastChunk mesh from this point on — they receive
+        // all chunks from sendState.offset onward (partial file).
+        // We do NOT reset sendState.offset or touch the worker.
+        dlog("DC opened for late-joining peer — current offset", sendState.offset, socketId);
+        addMsg(`<span class="muted">📡 New receiver joined — sending from ${fmtBytes(sendState.offset)}</span>`);
+        const file = sendState.file;
+        if (file) {
+          try {
+            channel.send(JSON.stringify({ type: "meta", meta: {
+              id:   file._qid || `${file.name}|${file.size}`,
+              name: file.name, size: file.size,
+              type: file.type || "application/octet-stream",
+              resumeFrom: sendState.offset,   // receiver can skip to this offset
+            }}));
+          } catch(e) { dlog("late-join meta send failed:", e); }
+        }
       }
 
-      // Ask the receiver to confirm how many bytes it has received.
-      // We MUST wait for the reply before seeding the worker or calling sendLoop.
-      // Sending data immediately into a freshly-opened SCTP channel before the
-      // receiver confirms causes "Failure to send data" because:
-      //   a) SCTP window not yet negotiated
-      //   b) We may re-send bytes the receiver already has → corruption
-      // _onResumeConfirmed() (called when resume-offset reply arrives) does the
-      // worker seek + sendLoop kick. Nothing else should trigger sending here.
-      try {
-        channel.send(JSON.stringify({ type: "resume-offset", offset: sendState.offset }));
-        dlog("sent resume-offset request to receiver");
-      } catch(e) { dlog("resume-offset send failed:", e); }
+      sendState.knownPeers.add(socketId);
 
     } else if (outgoingFile && !sendState.running) {
       // ── FRESH start: first connection for this file ───────────────────────
+      sendState.knownPeers.add(socketId);
       sendFile(outgoingFile).catch(console.error);
     }
   };
@@ -1177,7 +1312,7 @@ function setupDataChannelFor(socketId, channel, gen) {
         setTimeout(() => startNextFile(), 900);
         return;
       }
-      if (msg.type === "done")   { await finalizeIncomingIfReady(); return; }
+      if (msg.type === "done")   { await finalizeIncomingIfReady(msg.sha256 || null); return; }
       if (msg.type === "cancel") {
         try { const id = incomingFile?.meta?.id; if (id && incomingFile?.meta) { upsertRecvItem(id, incomingFile.meta.name, incomingFile.meta.size || 0, "canceled", incomingFile.receivedBytes || 0, incomingFile.meta.size || 0); renderRecvQueueUI(); } } catch {}
         cancelTransfer(`${msg.by || "Peer"} canceled`, false);
@@ -1272,19 +1407,22 @@ async function makeOfferAndConnect(targetSocketId) {
 
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
-  socket.emit("webrtc-offer", { to: sid, sdp: pc.localDescription });
+  const sigMsg = { to: sid, sdp: pc.localDescription };
+  socket.emit("webrtc-offer", sigMsg);
+  _bcBroadcast({ type: "webrtc-offer", from: socket.id, ...sigMsg });
 }
 
-socket.on("webrtc-offer", async ({ from, sdp, resume, offset }) => {
+async function _handleWebrtcOffer({ from, sdp, resume }) {
   _primaryPeerSocketId = from;
   const pc = await createPeerConnectionFor(from);
   await pc.setRemoteDescription(sdp);
 
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);
-  socket.emit("webrtc-answer", { to: from, sdp: pc.localDescription });
+  const sigMsg = { to: from, sdp: pc.localDescription };
+  socket.emit("webrtc-answer", sigMsg);
+  _bcBroadcast({ type: "webrtc-answer", from: socket.id, ...sigMsg });
 
-  // If this is a reconnect resume offer, acknowledge with current receive offset
   if (resume && incomingFile) {
     setTimeout(() => {
       const peer = getPeer(from);
@@ -1293,21 +1431,25 @@ socket.on("webrtc-offer", async ({ from, sdp, resume, offset }) => {
       }
     }, 500);
   }
-});
+}
 
-socket.on("webrtc-answer", async ({ from, sdp }) => {
+async function _handleWebrtcAnswer({ from, sdp }) {
   const peer = getPeer(from || _primaryPeerSocketId);
   if (peer) await peer.pc.setRemoteDescription(sdp);
   else if (window.pc) await window.pc.setRemoteDescription(sdp);
-});
+}
 
-socket.on("webrtc-ice", async ({ from, candidate }) => {
+async function _handleWebrtcIce({ from, candidate }) {
   const sid = from || _primaryPeerSocketId;
   const peer = getPeer(sid);
   try {
     if (peer) await peer.pc.addIceCandidate(candidate);
   } catch(e) { dlog("addIceCandidate error:", e); }
-});
+}
+
+socket.on("webrtc-offer",  msg => _handleWebrtcOffer(msg));
+socket.on("webrtc-answer", msg => _handleWebrtcAnswer(msg));
+socket.on("webrtc-ice",    msg => { _handleWebrtcIce(msg); });
 
 // ─── SAFE CLOSE ───────────────────────────────────────────────────────────────
 function safeCloseAllPeers() {
@@ -1391,6 +1533,8 @@ function updateSenderUIByAck() {
 function startNextFile() {
   if (sending || fileQueue.length === 0) return;
   const file = fileQueue.shift();
+  // Update broadcast queue — first file is now sending, rest still pending
+  try { if (typeof window.multiroomBroadcastQueue === "function") window.multiroomBroadcastQueue(fileQueue.map(f => ({ name: f.name, size: f.size }))); } catch {}
   sending = true;
   transferCompleted = false; gracefulClosing = false;
   resetReceiverReady(); retryInProgress = false;
@@ -1407,6 +1551,9 @@ socket.on("file-offer", ({ from, fromName, fromShort, meta }) => {
   pendingIncoming = { from, meta };
   try { const id = meta?.id || `${meta?.name}|${meta?.size}`; upsertRecvItem(id, meta?.name, meta?.size || 0, "pending", 0, meta?.size || 0); renderRecvQueueUI(); } catch {}
   const who = fromName || fromShort || (from ? from.substring(0, 5) : "User");
+
+  // Fire background notification (no-op when tab is visible or permission denied)
+  showFileOfferNotif(who, meta?.name || "file", meta?.size || 0);
 
   // ── Solo/multi modal rule (set by multiroom.js) ───────────────────────────
   // Solo room (1 peer): skip modal after first accept — auto-accept subsequent files.
@@ -1482,10 +1629,19 @@ acceptBtn.onclick = async () => {
 };
 
 socket.on("file-answer", async ({ from, accepted }) => {
-  if (!accepted) { setStatus("Receiver rejected."); addMsg(`<span class="muted">❌ Rejected.</span>`); outgoingFile = null; return; }
-  _primaryPeerSocketId = from;
+  if (!accepted) {
+    addMsg(`<span class="muted">❌ ${from ? from.substring(0,6) : "Peer"} rejected.</span>`);
+    // Only clear outgoingFile if no transfer is running and no peers accepted yet
+    if (!sendState.running && peerConnections.size === 0) {
+      setStatus("Receiver rejected.");
+      outgoingFile = null;
+    }
+    return;
+  }
+  // Don't overwrite _primaryPeerSocketId if transfer already running with another peer
+  if (!_primaryPeerSocketId) _primaryPeerSocketId = from;
   setStatus("Accepted. Connecting P2P...");
-  addMsg(`<span class="muted">📤 Accepted. Connecting P2P...</span>`);
+  addMsg(`<span class="muted">📤 Accepted by ${from ? from.substring(0,6) : "peer"}. Connecting P2P...</span>`);
   await makeOfferAndConnect(from);
 });
 
@@ -1520,6 +1676,7 @@ async function sendFile(file) {
   sendState.lastAckTickT = 0; sendState.lastAckTickB = 0; sendState.ackEma = 0;
   sendState.gotComplete = false; sendState.chunkIndex = 0;
   sendState.pendingRetransmits = new Map();
+  sendState.knownPeers = new Set();
 
   noSleepStart();
   resetReceiverReady(); retryInProgress = false;
@@ -1692,7 +1849,9 @@ async function sendFile(file) {
     }
     if (e.data.type === "done") {
       workerDone = true;
-      dlog("[WORKER] all chunks read, queue:", chunkQueue.length);
+      // Stash SHA-256 so finalizeSend can broadcast it with the "done" message
+      sendState._sha256 = e.data.sha256 || null;
+      dlog("[WORKER] all chunks read, queue:", chunkQueue.length, "sha256:", sendState._sha256?.slice(0,12));
       if (chunkQueue.length === 0 && !allSent) { allSent = true; finalizeSend(); }
     }
   };
@@ -1728,7 +1887,7 @@ async function sendFile(file) {
     });
     await waitDrain();
 
-    broadcastMsg({ type: "done" });
+    broadcastMsg({ type: "done", sha256: sendState._sha256 || null });
     broadcastMsg({ type: "status-req" });
 
     // Force progress to 100% on sender side — don't wait for last ACK
@@ -1816,11 +1975,15 @@ async function startReceiver(meta) {
   resetTransferUI();
   cancelBtn.disabled = false;
 
+  // If sender sent resumeFrom (late join mid-transfer), start from that offset.
+  // The receiver will only get chunks from that point onward.
+  const startOffset = (meta.resumeFrom && meta.resumeFrom > 0) ? meta.resumeFrom : 0;
+
   incomingFile = {
     meta,
-    receivedBytes: 0,
-    lastAckSent: 0,
-    lastT: performance.now(), lastB: 0, ema: 0,
+    receivedBytes: startOffset,
+    lastAckSent: startOffset,
+    lastT: performance.now(), lastB: startOffset, ema: 0,
     chunks: [],        // fresh empty array — never reuse from a previous transfer
     writable: null,
     writeChain: Promise.resolve(),
@@ -1829,9 +1992,9 @@ async function startReceiver(meta) {
     receivedChunkIndices: new Set(),
   };
 
-  setStatus(`Receiving: ${meta.name} (${fmtBytes(meta.size)})`);
-  addMsg(`<b>Receiving:</b> ${meta.name} (${fmtBytes(meta.size)})`);
-  dlog("startReceiver", meta);
+  setStatus(`Receiving: ${meta.name} (${fmtBytes(meta.size)})${startOffset > 0 ? ` — from ${fmtBytes(startOffset)}` : ''}`);
+  addMsg(`<b>Receiving:</b> ${meta.name} (${fmtBytes(meta.size)})${startOffset > 0 ? ` <span class="muted">(joining mid-transfer from ${fmtBytes(startOffset)})</span>` : ''}`);
+  dlog("startReceiver", meta, "startOffset:", startOffset);
   try { const id = meta?.id || `${meta?.name}|${meta?.size}`; upsertRecvItem(id, meta.name, meta.size || 0, "receiving", 0, meta.size || 0); renderRecvQueueUI(); } catch {}
 
   // Use disk streaming for any file where the user pre-chose a save location
@@ -1940,9 +2103,10 @@ async function handleIncomingChunk(buf) {
   }
 }
 
-async function finalizeIncomingIfReady() {
+async function finalizeIncomingIfReady(sha256 = null) {
   if (!incomingFile) return;
   incomingFile.sawDone = true;
+  if (sha256) incomingFile.expectedSha256 = sha256;   // store for verification
 
   if (incomingFile.receivedBytes >= incomingFile.meta.size) {
     if (incomingFile.finalizing) return;
@@ -1990,6 +2154,25 @@ async function finalizeIncomingFile() {
   const writableRef = incomingFile.writable;
   const chainRef    = incomingFile.writeChain;
   const meta        = incomingFile.meta;
+  const expectedSha = incomingFile.expectedSha256 || null;
+
+  // ── SHA-256 helper ───────────────────────────────────────────────────────
+  async function verifySha256(data) {
+    if (!expectedSha || typeof crypto === "undefined" || !crypto.subtle) return true; // skip
+    try {
+      const buf     = data instanceof Blob ? await data.arrayBuffer() : data;
+      const hashBuf = await crypto.subtle.digest("SHA-256", buf);
+      const actual  = Array.from(new Uint8Array(hashBuf)).map(b => b.toString(16).padStart(2,"0")).join("");
+      if (actual !== expectedSha) {
+        dlog("SHA-256 MISMATCH", { expected: expectedSha, actual });
+        addMsg(`<span class="muted">⚠️ Integrity check failed — file may be corrupted. Please retry.</span>`);
+        return false;
+      }
+      dlog("SHA-256 verified ✅", actual.slice(0,12) + "…");
+      addMsg(`<span class="muted">🔒 Integrity verified (SHA-256 ✅)</span>`);
+      return true;
+    } catch { return true; } // verification error → don't block download
+  }
   try {
     if (writableRef) {
       await chainRef;
@@ -2014,6 +2197,16 @@ async function finalizeIncomingFile() {
         return;
       }
       const url  = URL.createObjectURL(blob);
+
+      // ── SHA-256 integrity check ────────────────────────────────────────────
+      const ok = await verifySha256(blob);
+      if (!ok) {
+        // Hash mismatch — don't save the corrupted file
+        URL.revokeObjectURL(url);
+        incomingFile = null;
+        setStatus("⚠️ Integrity check failed — please retry");
+        return;
+      }
 
       // ── Auto-download: trigger immediately, no manual "Save" click needed ─
       // Create a hidden <a> and click it so the browser saves the file straight

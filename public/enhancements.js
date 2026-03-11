@@ -180,6 +180,7 @@
   //  3 ── ADAPTIVE CHUNK BADGE
   // ─────────────────────────────────────────────────────────────────────────────
   var _lastTierIdx = -1;
+  var _tierToasted = -1;  // track which tier we already toasted — never repeat
   var CHUNK_TIERS = [
     { max:24*1024,   label:"🐢 Slow",    bg:"rgba(239,68,68,.1)",   col:"#7f1d1d" },
     { max:80*1024,   label:"🐢 16KB",    bg:"rgba(239,68,68,.1)",   col:"#7f1d1d" },
@@ -221,10 +222,12 @@
     badge.style.border     = "1px solid " + t.col + "44";
     badge.textContent      = t.label + " — " + (cs/1024).toFixed(0) + "KB chunks";
 
-    if (inTransfer) {
-      if (tierIdx <= 1)      toast("Slow network detected — using " + (cs/1024).toFixed(0) + "KB chunks", "warn", 5000);
+    // Only toast ONCE per tier — never repeat the same tier toast
+    if (inTransfer && tierIdx !== _tierToasted) {
+      _tierToasted = tierIdx;
+      if (tierIdx <= 1)      toast("Slow network — using " + (cs/1024).toFixed(0) + "KB chunks", "warn", 5000);
       else if (tierIdx === 2) toast("Network adjusted — " + (cs/1024).toFixed(0) + "KB chunks", "info", 4000);
-      else if (tierIdx >= 3)  toast("Fast network — " + (cs/1024).toFixed(0) + "KB chunks ⚡", "success", 4000);
+      else if (tierIdx >= 3)  toast("Fast network detected ⚡", "success", 4000);
     }
   }
 
@@ -415,6 +418,7 @@
       _sumBytes = 0;
       _hideSum();
       _lastTierIdx = -1;
+      _tierToasted = -1;
       _startRetry();
     }
 
@@ -435,14 +439,14 @@
       toast("Transfer complete! 🎉", "success", 5000);
       _stopRetry();
       _stopKeepalive();
-      setTimeout(function(){ var b=el("enh-chunk-badge"); if(b){b.style.display="none";_lastTierIdx=-1;} }, 3500);
+      setTimeout(function(){ var b=el("enh-chunk-badge"); if(b){b.style.display="none";_lastTierIdx=-1;_tierToasted=-1;} }, 3500);
     }
 
-    // Cancel / error
-    if (/❌/.test(statusTxt) && _inTransfer) {
-      _inTransfer = false;
+    // Cancel / error / incomplete — stop transfer loop
+    if ((/❌|incomplete|retry/i.test(statusTxt)) && _inTransfer) {
+      _inTransfer = false; _sumDone = true;
       _stopRetry(); _stopKeepalive();
-      var b = el("enh-chunk-badge"); if(b){b.style.display="none";_lastTierIdx=-1;}
+      var b = el("enh-chunk-badge"); if(b){b.style.display="none";_lastTierIdx=-1;_tierToasted=-1;}
       var bpEl = el("enh-bp"); if(bpEl) bpEl.style.display="none";
     }
 
@@ -512,6 +516,20 @@
   function init() {
     _patchButtons();
     _patchSocket();
+    // Flush any addMsg() calls that fired before enhancements.js loaded
+    if (window.__addMsgQueue && window.__addMsgQueue.length) {
+      window.__addMsgQueue.forEach(function(html) {
+        var tmp = document.createElement("div"); tmp.innerHTML = html;
+        var text = (tmp.innerText || tmp.textContent || "").trim();
+        if (!text) return;
+        var type = /❌|failed|incomplete|canceled|retry|corrupt/i.test(text) ? "error"
+                 : /⚠️|unstable|HTTPS|slow/i.test(text) ? "warn"
+                 : /✅|complete|received|saved|verified/i.test(text) ? "success"
+                 : "info";
+        toast(text, type, 4500);
+      });
+      window.__addMsgQueue = [];
+    }
     console.log("[ENH] enhancements.js loaded — 8 features active");
   }
 

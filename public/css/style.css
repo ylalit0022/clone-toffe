@@ -1,5 +1,4 @@
-
-    /* ================================================
+/* ================================================
        TRANZO  --  WHITE + EMERALD + AMBER
     ================================================ */
     :root {
@@ -509,6 +508,10 @@
       font-size: 13px; font-weight: 500; color: var(--muted);
       display: inline-flex; align-items: center; gap: 4px;
     }
+    .stat-pill--fixed {
+      min-width: 130px; justify-content: space-between;
+    }
+    .stat-pill--fixed b { min-width: 70px; text-align: right; }
     .stat-pill b { color: var(--text); font-weight: 700; }
 
     #fileStatus {
@@ -598,4 +601,3 @@
     @media (min-width: 576px) and (max-width: 767.98px) {
       .hero { padding: 56px 0 40px; }
     }
-  

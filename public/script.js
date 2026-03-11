@@ -33,7 +33,7 @@ const socket = io({
 });
 
 // ─── DEBUG ────────────────────────────────────────────────────────────────────
-const DEBUG = true;
+const DEBUG = false;
 const dlog = (...a) => DEBUG && console.log("[P2P]", ...a);
 
 // ─── SECURITY / VALIDATION CONSTANTS ─────────────────────────────────────────
@@ -281,7 +281,7 @@ async function detectAndApplyNetworkProfile(pcRef) {
     }
 
     showConnectionTypeBadge(NET.pathType, NET.rttMs);
-    addMsg(`<span class="muted">📡 Path: <b>${NET.pathType.toUpperCase()}</b> · RTT ${NET.rttMs.toFixed(0)}ms · Chunk ${(NET.chunkSize/1024).toFixed(0)}KB · Pipeline ${NET.pipelineDepth}</span>`);
+    dlog(`[NET] Path: ${NET.pathType.toUpperCase()} · RTT ${NET.rttMs.toFixed(0)}ms · Chunk ${(NET.chunkSize/1024).toFixed(0)}KB · Pipeline ${NET.pipelineDepth}`);
   } catch(e) { dlog("[NET] detectProfile error", e); }
 }
 
@@ -294,7 +294,6 @@ function recordThroughputSample(bps, fileWorker, file, currentDepth) {
   if (NET.turnSlowSamples.length > SLOW_TURN_SAMPLES) NET.turnSlowSamples.shift();
   if (NET.turnSlowSamples.length === SLOW_TURN_SAMPLES && NET.turnSlowSamples.every(s => s < SLOW_TURN_THRESHOLD)) {
     dlog("[NET] SLOW TURN detected — reducing chunk size to 64 KB");
-    addMsg(`<span class="muted">⚠️ Slow TURN relay — reducing to 64 KB chunks</span>`);
     NET.turnSlowReduced = true;
     applyNetworkProfile();
     if (fileWorker && file) {
@@ -329,6 +328,7 @@ function stopRttPolling() {
 
 // ─── DIAGNOSTICS PANEL ────────────────────────────────────────────────────────
 function ensureDiagnosticsPanel() {
+  if (!DEBUG) return;  // production: hide diagnostics entirely
   if (document.getElementById("diagPanel")) return;
   const panel = document.createElement("div");
   panel.id = "diagPanel";
@@ -711,8 +711,22 @@ function setProgressBytes(done, total) {
   progressText.innerText = `${Math.min(100, pct)}% (${fmtBytes(done)} / ${fmtBytes(total)})`;
 }
 function addMsg(html) {
-  const div = document.createElement("div"); div.className = "msg"; div.innerHTML = html;
-  chatBox.appendChild(div); chatBox.scrollTop = chatBox.scrollHeight;
+  // Production: system messages go to toast overlay (enhancements.js), NOT chatBox.
+  // chatBox is reserved for real user chat bubbles only.
+  if (typeof window.__enh !== "undefined" && window.__enh.toast) {
+    const tmp = document.createElement("div"); tmp.innerHTML = html;
+    const text = (tmp.innerText || tmp.textContent || "").trim();
+    if (!text) return;
+    const type = /❌|failed|incomplete|canceled|retry|corrupt/i.test(text) ? "error"
+               : /⚠️|unstable|HTTPS|slow/i.test(text) ? "warn"
+               : /✅|complete|received|saved|verified/i.test(text) ? "success"
+               : "info";
+    window.__enh.toast(text, type, 4500);
+  } else {
+    // enhancements.js not loaded yet — queue into a small buffer and flush later
+    if (!window.__addMsgQueue) window.__addMsgQueue = [];
+    window.__addMsgQueue.push(html);
+  }
 }
 function addChatBubble({ user, text, mine }) {
   const row = document.createElement("div"); row.className = `msgRow ${mine ? "mine" : "other"}`;
@@ -764,6 +778,24 @@ function showFileOfferNotif(who, fileName, fileSize) {
     // Clicking the notification focuses the tab and shows the modal
     n.onclick = () => { window.focus(); n.close(); };
   } catch {}
+}
+
+function showChatNotif(who, text) {
+  // In-app toast alert (always shown, no permission needed)
+  if (typeof window.__enh !== "undefined" && window.__enh.toast) {
+    window.__enh.toast(`💬 <b>${who}:</b> ${text}`, "info", 5000);
+  }
+  // Browser notification (only when tab is hidden)
+  if (typeof Notification === "undefined") return;
+  if (Notification.permission !== "granted") return;
+  try {
+    const n = new Notification(`💬 ${who}`, {
+      body: text,
+      icon: "/favicon.ico",
+    });
+    n.onclick = () => { window.focus(); n.close(); };
+    setTimeout(() => n.close(), 5000);
+  } catch(e) { console.warn("[Notif] chat notif failed:", e); }
 }
 
 // ─── DEVICE NAME ──────────────────────────────────────────────────────────────
@@ -841,7 +873,7 @@ if (copyLinkBtn) {
       // Auto-accept: receiver joined via share link — skip manual accept popup
       autoAcceptThisRoom = true;
       try { sessionStorage.setItem(`autoAccept:${roomParam}`, "1"); } catch {}
-      addMsg(`<span class="muted">🔗 Joined via share link — auto-accept enabled. Waiting for sender to share files...</span>`);
+      addMsg(`<span class="muted">🔗 Joined via share link — waiting for sender...</span>`);
     }
 
     joinRoom(roomParam, "join");
@@ -863,11 +895,11 @@ function joinRoom(roomId, mode) {
   chatSection.style.display = "block";
   if (mode === "create") {
     setConnectedUI(false, "Room created", `Room: ${roomId} — Waiting...`);
-    addMsg(`<span class="muted">🆕 Room: <b>${roomId}</b> (waiting...)</span>`);
+    addMsg(`<span class="muted">Room <b>${roomId}</b> created — share the link to invite others.</span>`);
     showShareLink(roomId);   // ← show share link for sender
   } else {
     setConnectedUI(false, "Joining...", `Room: ${roomId}`);
-    addMsg(`<span class="muted">➡️ Joined: <b>${roomId}</b></span>`);
+    addMsg(`<span class="muted">Joining room <b>${roomId}</b>...</span>`);
     hideShareLink();
   }
 }
@@ -875,7 +907,7 @@ createBtn.onclick = () => { requestNotifPermission(); const id = Math.random().t
 joinBtn.onclick   = () => { requestNotifPermission(); const r = roomInput.value.trim(); if (r) joinRoom(r, "join"); };
 socket.on("room-status", ({ room, users }) => {
   if (room !== currentRoom) return;
-  if (users >= 2) { setConnectedUI(true, "Connected", `Room: ${room} — ${users} user${users>2?"s":""} connected`); addMsg(`<span class="muted">✅ ${users} users in room.</span>`); }
+  if (users >= 2) { setConnectedUI(true, "Connected", `Room: ${room} — ${users} user${users>2?"s":""} connected`); addMsg(`<span class="muted">✅ Ready — ${users} people connected.</span>`); }
   else            { setConnectedUI(false, "Waiting...", `Room: ${room} — Waiting...`); }
 });
 
@@ -950,7 +982,14 @@ sendBtn.onclick = () => {
   messageInput.value = "";
   socket.emit("stop-typing", { roomId: currentRoom, user: getDeviceName() });
 };
-socket.on("chat-msg", data => { if (data.from !== socket.id) addChatBubble({ user: data.name || "Peer", text: data.text || "", mine: false }); });
+socket.on("chat-msg", data => {
+  if (data.from !== socket.id) {
+    const who  = data.name || "Peer";
+    const text = data.text || "";
+    addChatBubble({ user: who, text, mine: false });
+    showChatNotif(who, text);
+  }
+});
 
 // ─── DRAG & DROP ──────────────────────────────────────────────────────────────
 function enableDragDrop() {
@@ -1023,7 +1062,7 @@ function enqueueFilesForSend(files) {
     try { file._qid = file._qid || (crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`); } catch { file._qid = `${Date.now()}-${Math.random()}`; }
     fileQueue.push(file);
     upsertSentItem(file._qid, file.name, file.size, "queued", 0, file.size);
-    addMsg(`<span class="muted">📤 Selected: ${file.name} (${fmtBytes(file.size)})</span>`);
+    addMsg(`<span class="muted">📤 Queued: <b>${file.name}</b> (${fmtBytes(file.size)})</span>`);
   });
   try { renderQueueUI(sending ? outgoingFile : null); } catch {}
   // Broadcast the queue to all room members
@@ -1099,8 +1138,7 @@ async function createPeerConnectionFor(socketId) {
         _iceFailTimers.delete(socketId);
         // Only handle here — do NOT also handle in onconnectionstatechange
         // to avoid the double-reconnect race.
-        dlog("ICE truly failed — triggering full reconnect", socketId);
-        addMsg(`<span class="muted">⚠️ ICE failed — reconnecting...</span>`);
+        dlog("ICE truly failed — reconnecting...");
         handlePeerFailed(socketId);
       }, 300);
       _iceFailTimers.set(socketId, t);
@@ -1149,7 +1187,7 @@ function handlePeerFailed(socketId) {
   _reconnectAttempts.set(socketId, attempts);
   const delay = Math.min(1000 * Math.pow(2, attempts - 1), 15000);
   dlog(`handlePeerFailed: attempt ${attempts}, delay ${delay}ms`, socketId);
-  addMsg(`<span class="muted">⚠️ Connection lost — reconnecting in ${(delay/1000).toFixed(1)}s (attempt ${attempts})...</span>`);
+  dlog(`handlePeerFailed: connection lost — reconnecting in ${(delay/1000).toFixed(1)}s (attempt ${attempts})...`);
 
   // Close the dead peer BEFORE scheduling reconnect so removePeer's dc.close()
   // doesn't re-trigger dc.onclose → handlePeerFailed again.
@@ -1191,7 +1229,6 @@ function setupDataChannelFor(socketId, channel, gen) {
 
   channel.onopen = () => {
     dlog("DC open", socketId, "gen", gen);
-    addMsg(`<span class="muted">✅ DataChannel open (${socketId.slice(0,6)})</span>`);
     const peer = getPeer(socketId);
     if (peer) peer.state = "open";
     // Reset backoff — connection is healthy
@@ -1212,7 +1249,6 @@ function setupDataChannelFor(socketId, channel, gen) {
       if (isReconnect) {
         // ── RECONNECT path ─────────────────────────────────────────────────
         dlog("DC reopened mid-transfer (reconnect) — offset", sendState.offset);
-        addMsg(`<span class="muted">🔄 Reconnected — resuming from ${fmtBytes(sendState.offset)}</span>`);
 
         if (typeof sendState._onReconnect === "function") {
           sendState._onReconnect(channel);
@@ -1230,7 +1266,6 @@ function setupDataChannelFor(socketId, channel, gen) {
         // all chunks from sendState.offset onward (partial file).
         // We do NOT reset sendState.offset or touch the worker.
         dlog("DC opened for late-joining peer — current offset", sendState.offset, socketId);
-        addMsg(`<span class="muted">📡 New receiver joined — sending from ${fmtBytes(sendState.offset)}</span>`);
         const file = sendState.file;
         if (file) {
           try {
@@ -1267,7 +1302,7 @@ function setupDataChannelFor(socketId, channel, gen) {
     const peer = getPeer(socketId);
     if (peer?.state === "closing") return;
 
-    addMsg(`<span class="muted">⚠️ DataChannel closed (${socketId.slice(0,6)})</span>`);
+    dlog("DC closed unexpected", socketId, "gen", gen);
     // Only trigger reconnect if we're mid-transfer and not already handling it
     if (sendState.running && !sendState.canceled && !retryInProgress) {
       handlePeerFailed(socketId);
@@ -1612,7 +1647,7 @@ acceptBtn.onclick = async () => {
     try {
       const handle = await window.showSaveFilePicker({ suggestedName: meta.name });
       writable = await handle.createWritable();
-      addMsg(`<span class="muted">💾 Save location chosen. Connecting...</span>`);
+      addMsg(`<span class="muted">💾 Save location set. Connecting...</span>`);
     } catch {
       addMsg(`<span class="muted">❌ Save dialog canceled.</span>`);
       socket.emit("file-answer", { to: pendingIncoming.from, accepted: false });
@@ -1635,12 +1670,12 @@ acceptBtn.onclick = async () => {
   _primaryPeerSocketId = pendingIncoming.from;
   pendingIncoming = null; modalBg.style.display = "none";
   setStatus("Accepted. Connecting P2P...");
-  addMsg(`<span class="muted">📥 Accepted. Connecting P2P...</span>`);
+  addMsg(`<span class="muted">Accepted. Establishing P2P connection...</span>`);
 };
 
 socket.on("file-answer", async ({ from, accepted }) => {
   if (!accepted) {
-    addMsg(`<span class="muted">❌ ${from ? from.substring(0,6) : "Peer"} rejected.</span>`);
+    addMsg(`<span class="muted">❌ The receiver declined the file.</span>`);
     // Only clear outgoingFile if no transfer is running and no peers accepted yet
     if (!sendState.running && peerConnections.size === 0) {
       setStatus("Receiver rejected.");
@@ -1651,7 +1686,7 @@ socket.on("file-answer", async ({ from, accepted }) => {
   // Don't overwrite _primaryPeerSocketId if transfer already running with another peer
   if (!_primaryPeerSocketId) _primaryPeerSocketId = from;
   setStatus("Accepted. Connecting P2P...");
-  addMsg(`<span class="muted">📤 Accepted by ${from ? from.substring(0,6) : "peer"}. Connecting P2P...</span>`);
+  addMsg(`<span class="muted">Connecting to peer...</span>`);
   await makeOfferAndConnect(from);
 });
 
@@ -1964,7 +1999,6 @@ async function startReceiver(meta) {
 
       if (isGenuineReconnect) {
         dlog("startReceiver: genuine reconnect — resuming at", fmtBytes(incomingFile.receivedBytes));
-        addMsg(`<span class="muted">🔄 Reconnected — resuming receive from ${fmtBytes(incomingFile.receivedBytes)}</span>`);
         try {
           window.dc?.send(JSON.stringify({ type: "ready" }));
         } catch(e) { dlog("ready send failed on reconnect:", e); }
@@ -2018,7 +2052,7 @@ async function startReceiver(meta) {
     // Consume the pre-chosen writable (covers both small and large files)
     incomingFile.writable = pendingWritable;
     pendingWritable = null;
-    addMsg(`<span class="muted">💾 Saving to disk: ${meta.name}</span>`);
+    addMsg(`<span class="muted">💾 Saving to disk: <b>${meta.name}</b></span>`);
   } else if (needDisk) {
     // Large file but no pendingWritable — shouldn't happen in normal flow
     // (acceptBtn should have set it), but handle gracefully as fallback.
@@ -2036,7 +2070,7 @@ async function startReceiver(meta) {
       setStatus("❌ Save canceled."); incomingFile = null; return;
     }
   } else {
-    addMsg(`<span class="muted">ℹ️ File will appear in Downloads panel after transfer.</span>`);
+    dlog("startReceiver: memory mode — file will be downloaded after transfer");
   }
 
   noSleepStart();

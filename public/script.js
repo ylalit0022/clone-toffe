@@ -339,7 +339,7 @@ function ensureDiagnosticsPanel() {
   `;
   panel.innerHTML = `<b>📊 Diagnostics</b><div id="diagContent" style="margin-top:4px;opacity:.8;">—</div>`;
   const host = (typeof fileInput !== "undefined" && fileInput)
-    ? (fileInput.closest(".card") || fileInput.parentElement || document.body)
+    ? (document.getElementById("filePanelQueues") || document.getElementById("filePanel") || fileInput.closest(".g-card-body") || document.body)
     : document.body;
   host.appendChild(panel);
 }
@@ -579,7 +579,7 @@ function upsertRecvItem(id, name, size, state, done = 0, total = size || 0) {
 function ensureQueueUI() {
   if (queueWrap) return;
   if (!fileInput) return;
-  const host = fileInput.closest(".card") || fileInput.parentElement || document.body;
+  const host = document.getElementById("filePanelQueues") || document.getElementById("filePanel") || fileInput.closest(".g-card-body") || document.body;
   queueWrap = document.createElement("div");
   queueWrap.style.marginTop = "10px";
   queueWrap.innerHTML = `
@@ -608,7 +608,7 @@ function renderQueueUI(currentFile = null) {
 function ensureRecvQueueUI() {
   if (recvQueueWrap) return;
   if (!fileInput) return;
-  const host = fileInput.closest(".card") || fileInput.parentElement || document.body;
+  const host = document.getElementById("filePanelQueues") || document.getElementById("filePanel") || fileInput.closest(".g-card-body") || document.body;
   recvQueueWrap = document.createElement("div");
   recvQueueWrap.style.marginTop = "10px";
   recvQueueWrap.innerHTML = `
@@ -657,7 +657,7 @@ function ensureDownloadsManager() {
   wrap.id = "downloadsManager"; wrap.style.cssText = "margin-top:16px;";
   wrap.innerHTML = `<div style="font-weight:800;margin-bottom:8px;">📂 Received Files</div>
     <div id="downloadsList" style="max-height:200px;overflow:auto;border:1px solid rgba(0,0,0,.10);border-radius:12px;padding:8px;background:rgba(255,255,255,.7);"></div>`;
-  const host = (typeof fileInput !== "undefined" && fileInput) ? (fileInput.closest(".card") || fileInput.parentElement || document.body) : document.body;
+  const host = (typeof fileInput !== "undefined" && fileInput) ? (document.getElementById("filePanelQueues") || document.getElementById("filePanel") || fileInput.closest(".g-card-body") || document.body) : document.body;
   host.appendChild(wrap);
 }
 function addToDownloadsManager({ name, size, type, savedToDisk, url }) {
@@ -945,24 +945,25 @@ socket.on("typing", ({ user }) => { if (user) showTyping(`${user} is typing...`)
 socket.on("stop-typing", () => showTyping(""));
 sendBtn.onclick = () => {
   const msg = messageInput.value.trim(); if (!msg) return;
-  socket.emit("send-message", { roomId: currentRoom, text: msg, user: getDeviceName() });
+  socket.emit("chat-msg", { text: msg });
   addChatBubble({ user: "You", text: msg, mine: true });
   messageInput.value = "";
   socket.emit("stop-typing", { roomId: currentRoom, user: getDeviceName() });
 };
-socket.on("receive-message", data => { if (!data.fromSelf) addChatBubble({ user: data.user || "Peer", text: data.text || "", mine: false }); });
+socket.on("chat-msg", data => { if (data.from !== socket.id) addChatBubble({ user: data.name || "Peer", text: data.text || "", mine: false }); });
 
 // ─── DRAG & DROP ──────────────────────────────────────────────────────────────
 function enableDragDrop() {
   if (!fileInput) return;
-  const host = fileInput.closest(".card") || fileInput.parentElement || document.body;
+  // Overlay attaches to #dropZone — the actual drag-drop area defined in the HTML.
+  const dropZoneEl = document.getElementById("dropZone") || fileInput.parentElement;
   let overlay = document.getElementById("dropOverlay");
   if (!overlay) {
     overlay = document.createElement("div");
     overlay.id = "dropOverlay";
     overlay.style.cssText = "position:relative;margin-top:10px;border:2px dashed rgba(0,0,0,.18);border-radius:16px;padding:14px;text-align:center;opacity:.75;user-select:none;";
     overlay.innerHTML = "🖱 Drag & Drop files here";
-    host.appendChild(overlay);
+    dropZoneEl.appendChild(overlay);
   }
   const onDragOver  = e => { e.preventDefault(); overlay.style.opacity = "1"; overlay.style.borderColor = "rgba(255,140,60,.7)"; };
   const onDragLeave = () => { overlay.style.opacity = ".75"; overlay.style.borderColor = "rgba(0,0,0,.18)"; };
@@ -1290,6 +1291,15 @@ function setupDataChannelFor(socketId, channel, gen) {
       if (msg.type === "nack") {
         // Receiver detected missing chunk — retransmit
         handleRetransmitRequest(msg.index, channel);
+        return;
+      }
+      if (msg.type === "retry-chunk") {
+        // enhancements.js smart retry: receiver requests a specific chunk by index
+        window.__enh?.handleRetryChunk(msg.index, channel);
+        return;
+      }
+      if (msg.type === "ping") {
+        // enhancements.js keepalive: respond with a pong (no-op on sender side)
         return;
       }
       if (msg.type === "status-res") { lastStatusRes = msg; return; }
@@ -1918,6 +1928,8 @@ async function sendFile(file) {
       await new Promise(r => setTimeout(r, 150));
     }
     noSleepStop();
+    // enhancements.js: fire summary panel for sender too
+    try { window.__enh?.onTransferComplete(file.size); } catch {}
   }
 
   // ── KICK OFF ──────────────────────────────────────────────────────────────
@@ -2232,6 +2244,8 @@ async function finalizeIncomingFile() {
     etaText.innerText = "Remaining: 0m 0s";
     cancelBtn.disabled = true;
     noSleepStop();
+    // enhancements.js: fire summary panel
+    try { window.__enh?.onTransferComplete(meta.size); } catch {}
 
     // ── Send "complete" and wait for DC to flush before closing ──────────────
     // CRITICAL: do NOT call safeCloseAllPeers() immediately after dc.send().
@@ -2264,3 +2278,14 @@ async function finalizeIncomingFile() {
 // ─── INIT ─────────────────────────────────────────────────────────────────────
 try { ensureQueueUI(); ensureRecvQueueUI(); ensureDiagnosticsPanel(); } catch {}
 applyNetworkProfile(); // set defaults before any transfer
+
+// ── WINDOW BRIDGE: expose script.js locals for enhancements.js ────────────────
+// const/let at top level are script-scoped (not window-global). These getters
+// always return the live value so enhancements.js reads current state.
+(function() {
+  try { Object.defineProperty(window, 'NET',          { get: function(){ return NET; },          configurable: true }); } catch(e) {}
+  try { Object.defineProperty(window, 'incomingFile', { get: function(){ return incomingFile; }, configurable: true }); } catch(e) {}
+  try { Object.defineProperty(window, 'sendState',    { get: function(){ return sendState; },    configurable: true }); } catch(e) {}
+  try { Object.defineProperty(window, 'socket',       { get: function(){ return socket; },       configurable: true }); } catch(e) {}
+  try { Object.defineProperty(window, '_signalingSocket', { get: function(){ return socket; },   configurable: true }); } catch(e) {}
+})();

@@ -1,0 +1,392 @@
+{% extends "../../layouts/base.njk" %}
+
+{% block title %}Active Sessions – Tranzo{% endblock %}
+{% block metaDesc %}View and manage all devices logged into your Tranzo account.{% endblock %}
+{% block canonical %}<link rel="canonical" href="https://share.rumnnlg.com/account/sessions" />{% endblock %}
+
+{% block head %}
+<style>
+  /* ── Page layout ─────────────────────────────────────────── */
+  .sessions-page {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 2.5rem 1rem 4rem;
+  }
+  .page-header { margin-bottom: 2rem; }
+  .page-header h1 {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 1.55rem; font-weight: 700;
+    color: var(--text); margin-bottom: .35rem;
+  }
+  .page-header p { font-size: .9rem; color: var(--muted); margin: 0; }
+
+  /* ── Session card ────────────────────────────────────────── */
+  .session-list { display: flex; flex-direction: column; gap: .75rem; }
+
+  .session-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--r);
+    padding: 1.1rem 1.25rem;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    transition: box-shadow .2s;
+  }
+  .session-card:hover { box-shadow: var(--shadow-sm); }
+  .session-card.is-current {
+    border-color: var(--borderEm);
+    background: linear-gradient(135deg, var(--emLight) 0%, var(--surface) 100%);
+  }
+
+  /* Icon */
+  .session-icon {
+    width: 44px; height: 44px; flex-shrink: 0;
+    border-radius: var(--rSm);
+    background: var(--surfaceHi);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.4rem;
+  }
+  .is-current .session-icon { background: var(--emLight); }
+
+  /* Info */
+  .session-info { flex: 1; min-width: 0; }
+  .session-name {
+    font-weight: 600; font-size: .9375rem;
+    color: var(--text);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    display: flex; align-items: center; gap: .5rem;
+  }
+  .badge-current {
+    font-size: .7rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+    background: var(--emLight); color: var(--emDark);
+    border: 1px solid var(--borderEm);
+    border-radius: 20px; padding: .15rem .55rem;
+    flex-shrink: 0;
+  }
+  .session-meta {
+    font-size: .8125rem; color: var(--muted);
+    margin-top: .25rem;
+    display: flex; flex-wrap: wrap; gap: .3rem .8rem;
+  }
+  .session-meta span { display: flex; align-items: center; gap: .25rem; }
+
+  /* Revoke button */
+  .btn-revoke {
+    flex-shrink: 0;
+    padding: .4rem .85rem;
+    background: transparent;
+    border: 1.5px solid var(--borderHi);
+    border-radius: var(--rSm);
+    font-size: .8125rem; font-weight: 600;
+    color: var(--muted); font-family: inherit;
+    cursor: pointer; transition: all .2s;
+    white-space: nowrap;
+  }
+  .btn-revoke:hover {
+    border-color: var(--rose); color: var(--rose);
+    background: var(--roseLight);
+  }
+  .btn-revoke:disabled { opacity: .4; cursor: not-allowed; }
+
+  /* ── Actions strip ───────────────────────────────────────── */
+  .actions-strip {
+    display: flex; gap: .75rem; flex-wrap: wrap;
+    margin-bottom: 1.5rem;
+    padding: 1rem 1.1rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--r);
+    align-items: center;
+  }
+  .actions-strip .user-info { flex: 1; min-width: 180px; }
+  .actions-strip .user-email { font-weight: 600; font-size: .9rem; color: var(--text); }
+  .actions-strip .user-plan  {
+    display: inline-block; font-size: .7rem; font-weight: 700;
+    text-transform: uppercase; letter-spacing: .05em;
+    background: var(--ambLight); color: var(--ambDark);
+    border: 1px solid var(--borderAmb); border-radius: 20px;
+    padding: .1rem .5rem; margin-left: .4rem;
+  }
+  .btn-logout-all {
+    padding: .45rem 1rem;
+    background: var(--roseLight);
+    border: 1.5px solid rgba(239,68,68,.3);
+    color: var(--rose); border-radius: var(--rSm);
+    font-size: .8125rem; font-weight: 600; font-family: inherit;
+    cursor: pointer; transition: all .2s;
+  }
+  .btn-logout-all:hover { background: var(--rose); color: #fff; }
+  .btn-change-pw {
+    padding: .45rem 1rem;
+    background: transparent;
+    border: 1.5px solid var(--border);
+    color: var(--muted); border-radius: var(--rSm);
+    font-size: .8125rem; font-weight: 600; font-family: inherit;
+    cursor: pointer; transition: all .2s;
+  }
+  .btn-change-pw:hover { border-color: var(--em); color: var(--em); }
+
+  /* ── Toast ───────────────────────────────────────────────── */
+  .toast {
+    position: fixed; bottom: 1.5rem; right: 1.5rem; z-index: 9999;
+    background: var(--text); color: #fff;
+    padding: .65rem 1.1rem; border-radius: var(--rSm);
+    font-size: .875rem; font-weight: 500;
+    box-shadow: var(--shadow-lg);
+    opacity: 0; transform: translateY(8px);
+    transition: opacity .25s, transform .25s;
+    pointer-events: none;
+  }
+  .toast.show { opacity: 1; transform: translateY(0); }
+  .toast.toast-error { background: var(--rose); }
+
+  /* ── Change-password modal ──────────────────────────────── */
+  .modal-backdrop {
+    display: none; position: fixed; inset: 0; z-index: 500;
+    background: rgba(17,24,39,.45); backdrop-filter: blur(3px);
+  }
+  .modal-backdrop.open { display: flex; align-items: center; justify-content: center; padding: 1rem; }
+  .modal-box {
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: var(--r); box-shadow: var(--shadow-lg);
+    padding: 2rem; width: 100%; max-width: 400px;
+  }
+  .modal-title {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 1.1rem; font-weight: 700; margin-bottom: 1.25rem;
+  }
+  .modal-form-label { font-size: .8125rem; font-weight: 600; color: var(--muted); display: block; margin-bottom: .35rem; }
+  .modal-form-input {
+    width: 100%; padding: .6rem .85rem;
+    border: 1.5px solid var(--border); border-radius: var(--rSm);
+    background: var(--surface); color: var(--text);
+    font-size: .9rem; font-family: inherit; outline: none; margin-bottom: .85rem;
+    transition: border-color .2s;
+  }
+  .modal-form-input:focus { border-color: var(--em); box-shadow: 0 0 0 3px var(--emGlow); }
+  .modal-actions { display: flex; gap: .65rem; justify-content: flex-end; margin-top: .5rem; }
+  .btn-modal-cancel {
+    padding: .5rem .9rem; background: transparent;
+    border: 1.5px solid var(--border); border-radius: var(--rSm);
+    font-size: .875rem; font-weight: 600; color: var(--muted);
+    font-family: inherit; cursor: pointer; transition: all .2s;
+  }
+  .btn-modal-cancel:hover { border-color: var(--borderHi); color: var(--text); }
+  .btn-modal-save {
+    padding: .5rem 1.1rem; background: var(--em);
+    border: none; border-radius: var(--rSm);
+    font-size: .875rem; font-weight: 600; color: #fff;
+    font-family: inherit; cursor: pointer; transition: background .2s;
+  }
+  .btn-modal-save:hover { background: var(--emDark); }
+  .modal-alert { font-size: .8125rem; color: var(--rose); margin-bottom: .65rem; display: none; }
+
+  /* ── Empty state ─────────────────────────────────────────── */
+  .empty-state { text-align: center; padding: 3rem 1rem; color: var(--muted); }
+  .empty-state .es-icon { font-size: 2.5rem; margin-bottom: .75rem; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="sessions-page">
+
+  <!-- Page header -->
+  <div class="page-header">
+    <h1>&#128274; Active Sessions</h1>
+    <p>Devices currently logged into your Tranzo account. You can log out individual devices or all at once.</p>
+  </div>
+
+  <!-- User info + bulk actions -->
+  <div class="actions-strip">
+    <div class="user-info">
+      <span class="user-email">{{ user.email }}</span>
+      <span class="user-plan">{{ user.plan }}</span>
+    </div>
+    <button class="btn-change-pw" onclick="openChangePw()">&#128273; Change password</button>
+    <button class="btn-logout-all" onclick="logoutAll()">&#128682; Log out all devices</button>
+  </div>
+
+  <!-- Session list -->
+  <div class="session-list" id="sessionList">
+
+    {% if sessions.length == 0 %}
+    <div class="empty-state">
+      <div class="es-icon">&#128274;</div>
+      <div>No active sessions found.</div>
+    </div>
+    {% else %}
+
+    {% for s in sessions %}
+    <div class="session-card {% if s.isCurrent %}is-current{% endif %}" id="card-{{ s.jti | replace('.', '_') | truncate(20, true, '') }}">
+
+      <div class="session-icon">
+        {% if s.deviceType == "mobile" %}&#128241;
+        {% elif s.deviceType == "tablet" %}&#128250;
+        {% elif s.deviceType == "desktop" %}&#128187;
+        {% else %}&#128421;{% endif %}
+      </div>
+
+      <div class="session-info">
+        <div class="session-name">
+          {{ s.deviceName }}
+          {% if s.isCurrent %}<span class="badge-current">This device</span>{% endif %}
+        </div>
+        <div class="session-meta">
+          <span>&#127757; {{ s.ipAddress }}</span>
+          <span>&#128336; Last active: <span class="rel-time" data-ts="{{ s.lastActiveAt }}">{{ s.lastActiveAt }}</span></span>
+          <span>&#128197; Signed in: <span class="rel-time" data-ts="{{ s.createdAt }}">{{ s.createdAt }}</span></span>
+        </div>
+      </div>
+
+      {% if s.isCurrent %}
+      <button class="btn-revoke" onclick="logoutCurrent()" title="Log out this device">Log out</button>
+      {% else %}
+      <button class="btn-revoke" onclick="revokeSession('{{ s.jti }}')" title="Revoke this session">Revoke</button>
+      {% endif %}
+
+    </div>
+    {% endfor %}
+
+    {% endif %}
+  </div>
+
+</div>
+
+<!-- Change Password Modal -->
+<div class="modal-backdrop" id="changePwModal" onclick="closeChangePw(event)">
+  <div class="modal-box" onclick="event.stopPropagation()">
+    <div class="modal-title">&#128273; Change Password</div>
+    <div class="modal-alert" id="pwAlert"></div>
+    <label class="modal-form-label">Current password</label>
+    <input class="modal-form-input" type="password" id="curPw" placeholder="••••••••" />
+    <label class="modal-form-label">New password</label>
+    <input class="modal-form-input" type="password" id="newPw" placeholder="Min. 8 characters" />
+    <label class="modal-form-label">Confirm new password</label>
+    <input class="modal-form-input" type="password" id="confirmPw" placeholder="Repeat new password" />
+    <div class="modal-actions">
+      <button class="btn-modal-cancel" onclick="closeChangePw()">Cancel</button>
+      <button class="btn-modal-save" onclick="submitChangePw()">Update password</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// ── Relative timestamps ───────────────────────────────────────
+function relTime(dateStr) {
+  const diff = Date.now() - new Date(dateStr).getTime();
+  const s = Math.floor(diff / 1000);
+  if (s < 60)  return "just now";
+  if (s < 3600) return `${Math.floor(s/60)}m ago`;
+  if (s < 86400) return `${Math.floor(s/3600)}h ago`;
+  return `${Math.floor(s/86400)}d ago`;
+}
+document.querySelectorAll(".rel-time").forEach(el => {
+  el.textContent = relTime(el.dataset.ts);
+});
+
+// ── Toast ─────────────────────────────────────────────────────
+let _toastTimer;
+function showToast(msg, isError = false) {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.className = "toast show" + (isError ? " toast-error" : "");
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => t.classList.remove("show"), 3000);
+}
+
+// ── Revoke a single session ───────────────────────────────────
+async function revokeSession(jti) {
+  if (!confirm("Remove this session? That device will be logged out.")) return;
+  try {
+    const r = await fetch("/account/sessions/revoke", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ jti }),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      // Remove card from UI
+      const cardId = "card-" + jti.replace(/\./g, "_").slice(0, 20);
+      document.getElementById(cardId)?.remove();
+      showToast("Session revoked.");
+    } else {
+      showToast(d.error || "Failed to revoke session.", true);
+    }
+  } catch {
+    showToast("Network error.", true);
+  }
+}
+
+// ── Log out current device ────────────────────────────────────
+async function logoutCurrent() {
+  try {
+    const r = await fetch("/auth/logout", { method: "POST" });
+    const d = await r.json();
+    window.location.href = d.redirect || "/auth/login";
+  } catch {
+    showToast("Network error.", true);
+  }
+}
+
+// ── Log out ALL devices ───────────────────────────────────────
+async function logoutAll() {
+  if (!confirm("Log out from ALL devices? You will need to sign in again everywhere.")) return;
+  try {
+    const r = await fetch("/auth/logout-all", { method: "POST" });
+    const d = await r.json();
+    window.location.href = d.redirect || "/auth/login";
+  } catch {
+    showToast("Network error.", true);
+  }
+}
+
+// ── Change password modal ─────────────────────────────────────
+function openChangePw()  { document.getElementById("changePwModal").classList.add("open"); }
+function closeChangePw(e) {
+  if (e && e.target !== document.getElementById("changePwModal")) return;
+  document.getElementById("changePwModal").classList.remove("open");
+  document.getElementById("pwAlert").style.display = "none";
+}
+
+async function submitChangePw() {
+  const cur     = document.getElementById("curPw").value;
+  const nw      = document.getElementById("newPw").value;
+  const confirm = document.getElementById("confirmPw").value;
+  const alert   = document.getElementById("pwAlert");
+
+  if (!cur || !nw || !confirm) { showPwAlert("All fields are required."); return; }
+  if (nw.length < 8)           { showPwAlert("New password must be at least 8 characters."); return; }
+  if (nw !== confirm)           { showPwAlert("New passwords don't match."); return; }
+
+  try {
+    const r = await fetch("/auth/change-password", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ currentPassword: cur, newPassword: nw }),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      closeChangePw();
+      showToast("✓ Password changed. Other devices have been logged out.");
+      setTimeout(() => location.reload(), 1500);
+    } else {
+      showPwAlert(d.error || "Failed to change password.");
+    }
+  } catch {
+    showPwAlert("Network error.");
+  }
+}
+
+function showPwAlert(msg) {
+  const el = document.getElementById("pwAlert");
+  el.textContent = msg;
+  el.style.display = "block";
+}
+</script>
+{% endblock %}

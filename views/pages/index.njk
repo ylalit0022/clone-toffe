@@ -273,6 +273,10 @@
 
               </div>
             </div>
+            <!-- Queue panels injected here by script.js (Queue, Receiver Queue,
+                 Diagnostics, Received Files). Kept outside the card so they
+                 do NOT render inside the drag-drop zone. -->
+            <div id="filePanelQueues" style="margin-top:0;"></div>
           </div>
           <!-- /filePanel -->
 
@@ -759,4 +763,5 @@ function handleQrImageUpload(input) {
 
 <script src="multiroom.js"></script>
 <script src="script.js"></script>
+<script src="enhancements.js"></script>
 {% endblock %}

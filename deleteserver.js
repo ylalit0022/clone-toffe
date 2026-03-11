@@ -1,6 +1,3 @@
-// Load .env FIRST — must be before any other require that reads process.env
-require("dotenv").config();
-
 // ═══════════════════════════════════════════════════════════════
 //  server.js  — P2P File Transfer Signaling Server
 //
@@ -20,17 +17,7 @@ const { Server } = require("socket.io");
 const path      = require("path");
 const os        = require("os");
 const nunjucks  = require("nunjucks");
-const cookieParser = require("cookie-parser");
 const { sitemapHandler } = require("./sitemap");
-
-// ── MongoDB ───────────────────────────────────────────────────
-const { connectDB } = require("./db/mongodb");
-connectDB();   // non-blocking — server works even if Mongo is down
-
-// ── Auth routes ───────────────────────────────────────────────
-const authRoutes    = require("./routes/authRoutes");
-const accountRoutes = require("./routes/account");
-const { optionalAuth } = require("./middleware/authMiddleware");
 
 const app    = express();
 const server = http.createServer(app);
@@ -70,27 +57,6 @@ app.set("view engine", "njk");
 // exist in the public/ folder. index.html is intentionally
 // absent from public/ so the nunjucks route wins.
 app.use(express.static(path.join(__dirname, "public")));
-
-// ── Body parsers + cookie parser ─────────────────────────────
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.use(cookieParser());
-
-// ── Auth routes (/auth/* and /account/*) ─────────────────────
-// Mounted BEFORE page routes so /auth/login etc. resolve correctly.
-app.use("/auth",    authRoutes);
-app.use("/account", accountRoutes);
-
-// ── Top-level /logout shortcut (for navbar <a href="/logout">) ─
-app.get("/logout", (req, res) => res.redirect("/auth/logout"));
-
-// ── injectUser — populates currentUser in every Nunjucks template ──
-// Uses optionalAuth so unauthenticated visitors just get currentUser=null.
-// Must be registered AFTER cookie-parser and BEFORE page routes.
-app.use(optionalAuth, (req, res, next) => {
-  res.locals.currentUser = req.user || null;
-  next();
-});
 
 // ── Sitemap ───────────────────────────────────────────────────
 // Dynamic XML sitemap — auto-updates when sitemap.js ROUTES change.
@@ -372,7 +338,6 @@ io.on("connection", (socket) => {
   // ── DISCONNECT ────────────────────────────────────────────
   socket.on("disconnect", (reason) => {
     console.log(`[-] Disconnected: ${socket.id} (${deviceName}) — reason: ${reason}`);
-
     if (!currentRoom) return;
 
     const savedRoom = currentRoom;

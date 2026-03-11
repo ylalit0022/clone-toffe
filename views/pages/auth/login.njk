@@ -1,0 +1,195 @@
+{% extends "../../layouts/base.njk" %}
+
+{% block title %}Login – Tranzo{% endblock %}
+{% block metaDesc %}Log in to your Tranzo account to manage your device sessions.{% endblock %}
+{% block canonical %}<link rel="canonical" href="https://share.rumnnlg.com/auth/login" />{% endblock %}
+
+{% block head %}
+<style>
+  .auth-wrap {
+    min-height: calc(100vh - 120px);
+    display: flex; align-items: center; justify-content: center;
+    padding: 2rem 1rem;
+  }
+  .auth-card {
+    width: 100%; max-width: 420px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--r); box-shadow: var(--shadow-md);
+    padding: 2.25rem 2rem;
+  }
+  .auth-logo { text-align: center; margin-bottom: 1.75rem; }
+  .auth-logo a {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 1.6rem; font-weight: 700;
+    color: var(--text); text-decoration: none;
+  }
+  .auth-logo .dot { color: var(--em); }
+  .auth-title {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 1.25rem; font-weight: 700;
+    color: var(--text); text-align: center; margin-bottom: .25rem;
+  }
+  .auth-sub { font-size: .875rem; color: var(--muted); text-align: center; margin-bottom: 1.75rem; }
+  .form-label { font-size: .8125rem; font-weight: 600; color: var(--muted); margin-bottom: .4rem; display: block; }
+  .form-input {
+    width: 100%; padding: .65rem .9rem;
+    border: 1.5px solid var(--border); border-radius: var(--rSm);
+    background: var(--bg); color: var(--text);
+    font-size: .9375rem; font-family: inherit; outline: none; transition: border-color .2s;
+  }
+  .form-input:focus { border-color: var(--em); box-shadow: 0 0 0 3px var(--emGlow); }
+  .form-group { margin-bottom: 1.1rem; }
+  .btn-auth {
+    width: 100%; padding: .7rem;
+    background: var(--em); color: #fff; border: none;
+    border-radius: var(--rSm); font-size: .9375rem; font-weight: 600;
+    font-family: inherit; cursor: pointer; transition: background .2s, transform .1s; margin-top: .5rem;
+  }
+  .btn-auth:hover  { background: var(--emDark); }
+  .btn-auth:active { transform: scale(.98); }
+  .btn-auth:disabled { opacity: .6; cursor: not-allowed; }
+  .auth-footer { text-align: center; margin-top: 1.25rem; font-size: .875rem; color: var(--muted); }
+  .auth-footer a { color: var(--em); font-weight: 600; text-decoration: none; }
+  .auth-footer a:hover { text-decoration: underline; }
+  .alert-box { padding: .7rem .9rem; border-radius: var(--rSm); font-size: .875rem; margin-bottom: 1.1rem; }
+  .alert-error   { background: var(--roseLight); color: var(--rose); border: 1px solid rgba(239,68,68,.2); }
+  .alert-warn    { background: var(--ambLight);  color: var(--ambDark); border: 1px solid var(--borderAmb); }
+  .alert-success { background: var(--emLight);   color: var(--emDark);  border: 1px solid var(--borderEm); }
+  .spinner { display: none; width: 16px; height: 16px; border: 2px solid rgba(255,255,255,.4); border-top-color: #fff; border-radius: 50%; animation: spin .6s linear infinite; margin: 0 auto; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .countdown { font-weight: 700; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="auth-wrap">
+  <div class="auth-card">
+    <div class="auth-logo">
+      <a href="/">&#9889; Tran<span class="dot">zo</span></a>
+    </div>
+    <div class="auth-title">Welcome back</div>
+    <div class="auth-sub">Sign in to your account</div>
+
+    {% if success == "logged_out" %}
+    <div class="alert-box alert-success">✓ Logged out successfully.</div>
+    {% elif success == "logged_out_all" %}
+    <div class="alert-box alert-success">✓ Logged out from all devices.</div>
+    {% endif %}
+
+    <div id="alertBox" style="display:none" class="alert-box alert-error"></div>
+    <div id="warnBox"  style="display:none" class="alert-box alert-warn"></div>
+    <div id="lockBox"  style="display:none" class="alert-box alert-error">
+      &#128274; Account locked. Try again in <span class="countdown" id="lockCountdown"></span>.
+    </div>
+
+    <div class="form-group">
+      <label class="form-label" for="email">Email address</label>
+      <input class="form-input" type="email" id="email" placeholder="you@example.com" autocomplete="email" required />
+    </div>
+    <div class="form-group">
+      <label class="form-label" for="password">Password</label>
+      <input class="form-input" type="password" id="password" placeholder="••••••••" autocomplete="current-password" required />
+    </div>
+
+    <button class="btn-auth" id="loginBtn" onclick="doLogin()">
+      <span id="btnText">Sign in</span>
+      <span class="spinner" id="btnSpinner"></span>
+    </button>
+
+    <div class="auth-footer">
+      Don't have an account? <a href="/auth/register">Create one</a>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const NEXT = {{ ('"' + next + '"') | safe }};
+let _lockTimer = null;
+
+async function doLogin() {
+  const email  = document.getElementById("email").value.trim();
+  const pw     = document.getElementById("password").value;
+  const btn    = document.getElementById("loginBtn");
+  const txt    = document.getElementById("btnText");
+  const spin   = document.getElementById("btnSpinner");
+
+  if (!email || !pw) { showAlert("Please enter email and password."); return; }
+
+  btn.disabled = true;
+  txt.style.display = "none";
+  spin.style.display = "block";
+  hideAlerts();
+
+  try {
+    const r = await fetch("/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password: pw, next: NEXT }),
+    });
+    const d = await r.json();
+
+    if (d.ok) {
+      window.location.href = d.redirect || "/";
+      return;
+    }
+
+    // 423 = account locked
+    if (r.status === 423 && d.lockedUntilMs) {
+      startLockCountdown(d.lockedUntilMs);
+      return;
+    }
+
+    // 429 = IP rate limited
+    if (r.status === 429) {
+      showAlert(d.error, "warn");
+      return;
+    }
+
+    showAlert(d.error || "Login failed.");
+
+  } catch { showAlert("Network error. Please try again."); }
+  finally {
+    btn.disabled = false;
+    txt.style.display = "";
+    spin.style.display = "none";
+  }
+}
+
+function startLockCountdown(lockedUntilMs) {
+  const lockBox = document.getElementById("lockBox");
+  const cd      = document.getElementById("lockCountdown");
+  lockBox.style.display = "block";
+
+  function tick() {
+    const secsLeft = Math.max(0, Math.ceil((lockedUntilMs - Date.now()) / 1000));
+    const m = Math.floor(secsLeft / 60);
+    const s = secsLeft % 60;
+    cd.textContent = `${m}:${String(s).padStart(2,"0")}`;
+    if (secsLeft <= 0) {
+      lockBox.style.display = "none";
+      clearInterval(_lockTimer);
+    }
+  }
+  tick();
+  _lockTimer = setInterval(tick, 1000);
+}
+
+function hideAlerts() {
+  ["alertBox","warnBox","lockBox"].forEach(id => {
+    document.getElementById(id).style.display = "none";
+  });
+  if (_lockTimer) { clearInterval(_lockTimer); _lockTimer = null; }
+}
+
+function showAlert(msg, type = "error") {
+  const id = type === "warn" ? "warnBox" : "alertBox";
+  const el = document.getElementById(id);
+  el.textContent = msg;
+  el.style.display = "block";
+}
+
+document.addEventListener("keydown", e => { if (e.key === "Enter") doLogin(); });
+</script>
+{% endblock %}

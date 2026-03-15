@@ -33,16 +33,13 @@ const socket = io({
 });
 
 // ─── DEBUG ────────────────────────────────────────────────────────────────────
-const DEBUG = false;
+const DEBUG = true;
 const dlog = (...a) => DEBUG && console.log("[P2P]", ...a);
 
 // ─── SECURITY / VALIDATION CONSTANTS ─────────────────────────────────────────
 const MAX_FILE_SIZE       = 10 * 1024 * 1024 * 1024;  // 10 GB hard limit
-const RATE_LIMIT_OFFERS   = 5;                          // max 5 file offers per minute
 const ALLOWED_EXTENSIONS  = null;                       // null = all types allowed
 //   Example whitelist: ["pdf","jpg","png","mp4","zip","docx"]
-
-let offerTimestamps = [];   // rate-limit sliding window
 
 function validateFile(file) {
   if (!file) return "No file selected.";
@@ -56,59 +53,9 @@ function validateFile(file) {
   return null; // OK
 }
 
-function checkRateLimit() {
-  const now = Date.now();
-  offerTimestamps = offerTimestamps.filter(t => now - t < 60000);
-  if (offerTimestamps.length >= RATE_LIMIT_OFFERS) return false;
-  offerTimestamps.push(now);
-  return true;
-}
 
 // ─── MOBILE: WAKE LOCK API ────────────────────────────────────────────────────
-let _wakeLock = null;
-async function wakeLockRequest() {
-  if (!('wakeLock' in navigator)) return;
-  try {
-    _wakeLock = await navigator.wakeLock.request('screen');
-    dlog("WakeLock: acquired");
-  } catch(e) { dlog("WakeLock: failed", e); }
-}
-async function wakeLockRelease() {
-  try { await _wakeLock?.release(); _wakeLock = null; dlog("WakeLock: released"); } catch {}
-}
-document.addEventListener("visibilitychange", async () => {
-  if (_wakeLock !== null && document.visibilityState === "visible") {
-    await wakeLockRequest();
-  }
-});
 
-// ─── TAB THROTTLING PREVENTION (AudioContext trick) ──────────────────────────
-let _noSleepCtx = null, _noSleepSource = null, _noSleepActive = false;
-
-function noSleepStart() {
-  if (_noSleepActive) return;
-  try {
-    if (!_noSleepCtx) _noSleepCtx = new (window.AudioContext || window.webkitAudioContext)();
-    const buf = _noSleepCtx.createBuffer(1, _noSleepCtx.sampleRate * 0.1, _noSleepCtx.sampleRate);
-    const src = _noSleepCtx.createBufferSource();
-    src.buffer = buf; src.loop = true;
-    src.connect(_noSleepCtx.destination); src.start();
-    _noSleepSource = src; _noSleepActive = true;
-    dlog("NoSleep: started");
-  } catch(e) { dlog("NoSleep: failed", e); }
-  wakeLockRequest();
-}
-function noSleepStop() {
-  if (!_noSleepActive) return;
-  try { _noSleepSource?.stop(); _noSleepSource?.disconnect(); } catch {}
-  _noSleepSource = null; _noSleepActive = false;
-  dlog("NoSleep: stopped");
-  wakeLockRelease();
-}
-
-document.addEventListener("visibilitychange", () => {
-  dlog(document.hidden ? "Tab hidden — NoSleep:" : "Tab visible", _noSleepActive);
-});
 
 // ─── MOBILE DETECTION ─────────────────────────────────────────────────────────
 const IS_MOBILE = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
@@ -170,13 +117,13 @@ const RTC_CONFIG = {
 // ─── ADAPTIVE NETWORK PROFILE ─────────────────────────────────────────────────
 // All transfer tuning lives here — updated per-peer and per-RTT poll
 const NET = {
-  pathType: "unknown",   // "lan" | "wan" | "turn" | "unknown"
+  pathType: "unknown",
   rttMs: 0,
   availBps: 0,
   chunkSize:      256 * 1024,
-  highWaterMark:  8   * 1024 * 1024,
-  lowWaterMark:   256 * 1024,
-  pipelineDepth:  8,
+  highWaterMark:  2   * 1024 * 1024,  // 2MB — pause when SCTP buffer reaches here
+  lowWaterMark:   256 * 1024,          // resume when buffer drains to 256KB
+  pipelineDepth:  16,                  // used for retransmit ring sizing only
   turnSlowSamples: [],
   turnSlowReduced: false,
 };
@@ -191,56 +138,73 @@ const NET = {
 const MAX_CHUNK_SIZE = 256 * 1024;   // 256 KB — hard Chrome/SCTP limit
 
 // Mobile chunk size cap — same as desktop (256 KB).
-// The old 64 KB cap was the primary cause of slow Android transfers:
-//   64 KB × pipeline 8  =  512 KB in flight  →  ~1–2 MB/s ceiling on WiFi.
-//   256 KB × pipeline 16 =  4 MB in flight   →  10–20 MB/s on good WiFi.
-// Chrome's 256 KB SCTP message size limit applies to individual messages,
-// not total memory. 256 KB chunks are safe on all modern Android Chrome builds.
 const MOBILE_MAX_CHUNK = 256 * 1024;
 
 function applyNetworkProfile() {
   const { pathType, rttMs, availBps } = NET;
 
-  // Pick a base chunk size by path type
+  // All non-TURN paths use 256KB chunks — the SCTP hard limit.
+  // Throughput is controlled entirely by pipeline depth and watermarks.
   if (pathType === "lan") {
-    NET.chunkSize = 256 * 1024;   // max allowed — pipeline depth gives throughput
+    NET.chunkSize = 256 * 1024;
   } else if (pathType === "wan") {
-    NET.chunkSize = 128 * 1024;
+    NET.chunkSize = 256 * 1024;   // raised from 128KB — fine for any broadband
   } else if (pathType === "turn") {
     NET.chunkSize = NET.turnSlowReduced ? 32 * 1024 : 64 * 1024;
   } else {
-    NET.chunkSize = 128 * 1024;   // unknown — conservative
+    NET.chunkSize = 256 * 1024;   // unknown — go fast, slow-TURN detection will reduce if needed
   }
 
   // Hard caps
   NET.chunkSize = Math.min(NET.chunkSize, MAX_CHUNK_SIZE);
   if (IS_MOBILE) NET.chunkSize = Math.min(NET.chunkSize, MOBILE_MAX_CHUNK);
 
-  // Dynamic pipeline depth — deeper pipeline on LAN compensates for smaller chunks
-  // LAN target: keep ~8MB in flight → 8MB / 256KB = 32 chunks
+  // ── Pipeline depth ────────────────────────────────────────────────────────
+  // Target: keep the Chrome SCTP buffer (16MB) filled at all times.
+  // depth = HWM / chunkSize ensures we always have enough in-flight chunks
+  // to absorb the drain latency between the HWM trigger and the next sendLoop.
+  //
+  // BDP formula used when RTT + bandwidth are known; otherwise use path-type
+  // defaults that are conservative enough not to cause memory pressure but
+  // deep enough to sustain full throughput.
   let depth;
   if (availBps > 0 && rttMs > 0) {
     const bdp = (availBps / 8) * (rttMs / 1000);
     depth = Math.round(bdp / NET.chunkSize);
   } else {
-    if (pathType === "lan")        depth = 32;   // 32 × 256KB = 8MB in flight
-    else if (rttMs < 5)            depth = 32;
-    else if (rttMs < 30)           depth = 16;
-    else if (rttMs < 100)          depth = 12;
-    else                           depth = 16;   // mobile gets same depth as desktop — old value of 8 was too shallow
+    // BUG-FIX-SCTP: depth=64 (16MB in-flight) caused "RTCDataChannel send queue
+    // is full" on every file because Chrome's internal SCTP send queue is only
+    // ~2MB — far smaller than the 16MB transport buffer. Sending 16MB of chunks
+    // before any drain saturates the SCTP queue immediately.
+    // depth=16 (4MB in-flight) keeps the pipe full without overflowing SCTP.
+    if (pathType === "lan")        depth = 16;
+    else if (rttMs < 5)            depth = 16;
+    else if (rttMs < 30)           depth = 12;
+    else if (rttMs < 100)          depth = 8;
+    else                           depth = 6;
   }
-  NET.pipelineDepth = Math.max(4, Math.min(64, depth));
+  // pipelineDepth is now used only for retransmit ring sizing and RTT polling.
+  // The actual send pipeline is pull-one-ahead (queue depth = 1), so this value
+  // no longer controls how many chunks are in-flight.
+  NET.pipelineDepth = 16;
 
-  // Buffer marks scaled to chunk size; stay under Chrome's 16MB SCTP limit
-  NET.highWaterMark = Math.min(8 * 1024 * 1024, NET.chunkSize * 32);
-  NET.lowWaterMark  = NET.chunkSize * 4;
+  // HWM: when dc.bufferedAmount reaches this, pause sending and wait for drain.
+  // 2MB is safely under Chrome's internal SCTP send queue (~2-4MB).
+  NET.highWaterMark = 2 * 1024 * 1024;
+  NET.lowWaterMark  = 256 * 1024;  // resume sending when buffer drops to 256KB
 
-  dlog("[NET] profile", {
-    path: pathType,
-    chunk: `${(NET.chunkSize / 1024).toFixed(0)}KB`,
-    depth: NET.pipelineDepth,
-    hwm: `${(NET.highWaterMark / 1024 / 1024).toFixed(2)}MB`,
-  });
+  // Only log when something actually changed — avoids log spam on repeated
+  // RTT polls that produce the same profile (common on LAN/stable connections).
+  const _profileKey = `${NET.pathType}|${NET.chunkSize}|${NET.pipelineDepth}`;
+  if (NET._lastProfileKey !== _profileKey) {
+    NET._lastProfileKey = _profileKey;
+    dlog("[NET] profile", {
+      path: NET.pathType,
+      chunk: `${(NET.chunkSize / 1024).toFixed(0)}KB`,
+      depth: NET.pipelineDepth,
+      hwm: `${(NET.highWaterMark / 1024 / 1024).toFixed(2)}MB`,
+    });
+  }
 }
 
 async function detectAndApplyNetworkProfile(pcRef) {
@@ -256,12 +220,18 @@ async function detectAndApplyNetworkProfile(pcRef) {
     const rt = remote?.candidateType ?? "";
     NET.rttMs    = (pair.currentRoundTripTime ?? 0) * 1000;
     NET.availBps = pair.availableOutgoingBitrate ?? 0;
+    const _prevPath = NET.pathType;
     if (lt === "host" && rt === "host")       NET.pathType = "lan";
     else if (lt === "relay" || rt === "relay") NET.pathType = "turn";
     else if (lt === "srflx" || rt === "srflx") NET.pathType = "wan";
     else                                       NET.pathType = "unknown";
-    NET.turnSlowSamples = [];
-    NET.turnSlowReduced = false;
+    // Only reset slow-TURN state when the path type actually changes.
+    // Resetting on every reconnect (same path) erases the slow-turn samples
+    // accumulated so far and delays reduction by 3 more samples each time.
+    if (NET.pathType !== _prevPath) {
+      NET.turnSlowSamples = [];
+      NET.turnSlowReduced = false;
+    }
     applyNetworkProfile();
 
     // ── Detect which TURN server is being used ────────────────────────────
@@ -281,7 +251,7 @@ async function detectAndApplyNetworkProfile(pcRef) {
     }
 
     showConnectionTypeBadge(NET.pathType, NET.rttMs);
-    dlog(`[NET] Path: ${NET.pathType.toUpperCase()} · RTT ${NET.rttMs.toFixed(0)}ms · Chunk ${(NET.chunkSize/1024).toFixed(0)}KB · Pipeline ${NET.pipelineDepth}`);
+    addMsg(`<span class="muted">📡 Path: <b>${NET.pathType.toUpperCase()}</b> · RTT ${NET.rttMs.toFixed(0)}ms · Chunk ${(NET.chunkSize/1024).toFixed(0)}KB · Pipeline ${NET.pipelineDepth}</span>`);
   } catch(e) { dlog("[NET] detectProfile error", e); }
 }
 
@@ -294,10 +264,16 @@ function recordThroughputSample(bps, fileWorker, file, currentDepth) {
   if (NET.turnSlowSamples.length > SLOW_TURN_SAMPLES) NET.turnSlowSamples.shift();
   if (NET.turnSlowSamples.length === SLOW_TURN_SAMPLES && NET.turnSlowSamples.every(s => s < SLOW_TURN_THRESHOLD)) {
     dlog("[NET] SLOW TURN detected — reducing chunk size to 64 KB");
+    showToast("Slow relay detected — optimizing...", "warn", 3000);
     NET.turnSlowReduced = true;
     applyNetworkProfile();
     if (fileWorker && file) {
       fileWorker.postMessage({ type: "resize", chunkSize: NET.chunkSize });
+      // BUG-FIX: keep startChunkSize in sync with the post-resize value.
+      // After a resize, any subsequent reconnect must recompute chunkIndex
+      // using THIS new size (not the original), because all chunks from this
+      // point forward are this size. Receiver records first-chunk size too.
+      if (sendState.startChunkSize) sendState.startChunkSize = NET.chunkSize;
     }
   }
 }
@@ -328,7 +304,6 @@ function stopRttPolling() {
 
 // ─── DIAGNOSTICS PANEL ────────────────────────────────────────────────────────
 function ensureDiagnosticsPanel() {
-  if (!DEBUG) return;  // production: hide diagnostics entirely
   if (document.getElementById("diagPanel")) return;
   const panel = document.createElement("div");
   panel.id = "diagPanel";
@@ -395,7 +370,7 @@ function showConnectionTypeBadge(pathType, rttMs) {
 }
 
 // ─── MEMORY CONSTANTS ─────────────────────────────────────────────────────────
-const MEMORY_MAX_BYTES   = 300 * 1024 * 1024;   // use disk streaming above 300 MB
+const MEMORY_MAX_BYTES   = 50 * 1024 * 1024;    // use disk streaming above 50 MB
 const MAX_MEMORY_BUFFER  = 32  * 1024 * 1024;   // never hold >32MB across all queues
 
 // ─── ACK / FLOW CONSTANTS ─────────────────────────────────────────────────────
@@ -418,29 +393,21 @@ function removePeer(socketId) {
     peerConnections.delete(socketId);
   }
 }
-function allDataChannels() {
-  return [...peerConnections.values()].map(p => p.dc).filter(d => d?.readyState === "open");
-}
 
-// Broadcast a chunk buffer to all open data channels (multi-receiver)
-function broadcastChunk(buf) {
-  const channels = allDataChannels();
-  if (channels.length === 0) return;
-  if (channels.length === 1) {
-    // single receiver: transfer ownership (zero-copy)
-    channels[0].send(buf);
-    return;
-  }
-  // Multiple receivers: copy once per additional peer, original used for first
-  for (let i = 0; i < channels.length; i++) {
-    channels[i].send(i === 0 ? buf : buf.slice(0));
-  }
+// ── Single-peer send helpers ─────────────────────────────────────────────────
+// 1-to-1 only — no multi-receiver mesh.
+function getPrimaryDc() {
+  if (!_primaryPeerSocketId) return null;
+  const p = getPeer(_primaryPeerSocketId);
+  return p?.dc?.readyState === "open" ? p.dc : null;
 }
-
-// Broadcast a JSON control message to all open data channels
-function broadcastMsg(obj) {
-  const str = JSON.stringify(obj);
-  allDataChannels().forEach(d => { try { d.send(str); } catch {} });
+function sendChunk(buf) {
+  const dc = getPrimaryDc();
+  if (dc) dc.send(buf);
+}
+function sendMsg(obj) {
+  const dc = getPrimaryDc();
+  if (dc) { try { dc.send(JSON.stringify(obj)); } catch {} }
 }
 
 // ─── LEGACY SINGLE-PEER ALIASES (backwards compat with existing signaling) ───
@@ -456,13 +423,106 @@ Object.defineProperty(window, "pc", {
   set() {},
 });
 
-// ─── GLOBAL STATE ─────────────────────────────────────────────────────────────
+// ─── DC KEEPALIVE ─────────────────────────────────────────────────────────────
+// Chrome's SCTP stack closes idle DataChannels after ~30s of no traffic.
+// Between files (SHA-256, disk flush, ICE for next file) the gap can exceed 30s.
+// Send a tiny ping every 15s to keep the connection alive.
+// The receiver already ignores "ping" messages (onmessage handler returns early).
+let _keepaliveTimer = null;
+
+function startDcKeepalive() {
+  stopDcKeepalive();
+  _keepaliveTimer = setInterval(() => {
+    const dc = getPrimaryDc();
+    if (dc?.readyState === "open") {
+      try { dc.send(JSON.stringify({ type: "ping" })); } catch {}
+    }
+  }, 15000);
+}
+
+function stopDcKeepalive() {
+  if (_keepaliveTimer) { clearInterval(_keepaliveTimer); _keepaliveTimer = null; }
+}
 let fileQueue     = [];
 let sending       = false;
 let outgoingFile  = null;
 let fileWorker    = null;
 let pendingIncoming = null;
 let pendingWritable = null;
+
+// ─── SESSION-LEVEL SAVE FOLDER ────────────────────────────────────────────────
+// Chosen once per session via showDirectoryPicker(), then reused for every
+// file ≥ MEMORY_MAX_BYTES. The user never sees a second picker for mixed-size
+// batches (e.g. 50 MB + 400 MB + 1 GB queued together).
+let _saveDir = null;   // FileSystemDirectoryHandle | null
+
+/**
+ * _getSaveDir() → Promise<FileSystemDirectoryHandle>
+ * Returns the cached directory handle, or prompts once to pick a folder.
+ * Throws if the user cancels (caller must handle).
+ */
+async function _getSaveDir() {
+  if (_saveDir) return _saveDir;
+  _saveDir = await window.showDirectoryPicker({ mode: "readwrite" });
+  addMsg(`<span class="muted">📁 Save folder set — all large files will be saved there automatically.</span>`);
+  dlog("Save folder chosen:", _saveDir.name);
+  return _saveDir;
+}
+
+/**
+ * _createWritableInDir(filename) → Promise<FileSystemWritableFileStream>
+ * Creates (or overwrites) a file in the session save folder and returns
+ * a writable stream. Automatically deduplicates names if the file exists.
+ */
+async function _createWritableInDir(filename) {
+  const dir = await _getSaveDir();
+  // Deduplicate: if "photo.jpg" exists use "photo (2).jpg", etc.
+  let finalName = filename;
+  let counter   = 2;
+  while (true) {
+    try {
+      await dir.getFileHandle(finalName, { create: false });
+      // File exists — try next suffix
+      const dot = filename.lastIndexOf(".");
+      finalName = dot > 0
+        ? filename.slice(0, dot) + ` (${counter})` + filename.slice(dot)
+        : filename + ` (${counter})`;
+      counter++;
+    } catch {
+      break;   // NotFoundError means name is free
+    }
+  }
+  const fileHandle = await dir.getFileHandle(finalName, { create: true });
+  _writableFileHandles.set(finalName, fileHandle);  // store for potential recovery
+  return fileHandle.createWritable();
+}
+
+// Map of filename → FileSystemFileHandle for writable recovery
+const _writableFileHandles = new Map();
+
+/**
+ * _reopenWritableAt(filename, position) → Promise<FileSystemWritableFileStream>
+ * Reopens a writable stream for an already-created file, seeked to `position`.
+ * Used when the original writable gets an InvalidStateError (datapipe broken).
+ * keepExistingContents=true preserves bytes already written.
+ */
+async function _reopenWritableAt(filename, position) {
+  const dir = await _getSaveDir();
+  // Use the stored handle if available, otherwise look up by name
+  let fileHandle = _writableFileHandles.get(filename);
+  if (!fileHandle) {
+    fileHandle = await dir.getFileHandle(filename, { create: false });
+    _writableFileHandles.set(filename, fileHandle);
+  }
+  const newWritable = await fileHandle.createWritable({ keepExistingData: true });
+  if (position > 0) {
+    await newWritable.seek(position);
+  }
+  return newWritable;
+}
+
+/** Reset the save folder (e.g. when user leaves the room). */
+function _clearSaveDir() { _saveDir = null; }
 let currentRoom   = "";
 let transferCompleted = false;
 let gracefulClosing   = false;
@@ -470,6 +530,14 @@ let peerGeneration    = 0;
 let retryInProgress   = false;
 let doneResendTimer   = null;
 let lastStatusRes     = null;
+
+// ── Session transfer stats (for completion popup) ──────────────────────────
+let _sessionSentFiles  = 0;   // files fully confirmed by receiver this session
+let _sessionSentBytes  = 0;   // total bytes sent this session
+let _sessionSentStart  = 0;   // performance.now() when first file started
+let _sessionRecvFiles  = 0;   // files fully received this session
+let _sessionRecvBytes  = 0;   // total bytes received this session
+let _sessionRecvStart  = 0;   // performance.now() when first file was received
 
 // Sender state
 let sendState = {
@@ -479,7 +547,9 @@ let sendState = {
   gotComplete: false,
   chunkIndex: 0,        // for retransmit tracking
   pendingRetransmits: new Map(), // index → buf
-  knownPeers: new Set(),  // socketIds that opened a DC for this transfer (reconnect detection)
+  knownPeers: new Set(),  // socketIds that opened a DC for this transfer
+  _workerGen: 0,        // incremented each sendFile() — drops stale worker messages
+  _queueRafId: null,    // RAF handle for throttled sender queue UI updates
 };
 
 // Receiver state
@@ -694,6 +764,7 @@ function formatETA(s) {
 }
 function resetTransferUI() {
   progressBar.value = 0;
+  if (typeof fileStatus !== "undefined") fileStatus.innerText = ""; // FIX: clear stale ✅ so enhancements.js poll doesn't re-fire toast loop
   speedText.innerText = "Speed: 0 MB/s";
   progressText.innerText = "0% (0 B / 0 B)";
   etaText.innerText = "Remaining: --";
@@ -705,28 +776,103 @@ function setConnectedUI(ok, msg, hint = "") {
   statusText.innerText = msg || (ok ? "Connected" : "Not Connected");
   roomHint.innerText = hint || "";
 }
+// Throttled progress update — at most once per 100ms.
+// Calling this on every 256KB chunk (thousands of times for a 600MB file)
+// triggers a layout/paint on every call and was measurably reducing throughput.
+let _progressRafId = null;
+let _progressDone = 0, _progressTotal = 1;
 function setProgressBytes(done, total) {
-  const pct = total > 0 ? Math.floor((done / total) * 100) : 0;
-  progressBar.value = Math.min(100, pct);
-  progressText.innerText = `${Math.min(100, pct)}% (${fmtBytes(done)} / ${fmtBytes(total)})`;
+  _progressDone = done; _progressTotal = total;
+  if (_progressRafId) return;  // already scheduled
+  _progressRafId = requestAnimationFrame(() => {
+    _progressRafId = null;
+    const pct = _progressTotal > 0 ? Math.floor((_progressDone / _progressTotal) * 100) : 0;
+    progressBar.value = Math.min(100, pct);
+    progressText.innerText = `${Math.min(100, pct)}% (${fmtBytes(_progressDone)} / ${fmtBytes(_progressTotal)})`;
+  });
 }
 function addMsg(html) {
-  // Production: system messages go to toast overlay (enhancements.js), NOT chatBox.
-  // chatBox is reserved for real user chat bubbles only.
-  if (typeof window.__enh !== "undefined" && window.__enh.toast) {
-    const tmp = document.createElement("div"); tmp.innerHTML = html;
-    const text = (tmp.innerText || tmp.textContent || "").trim();
-    if (!text) return;
-    const type = /❌|failed|incomplete|canceled|retry|corrupt/i.test(text) ? "error"
-               : /⚠️|unstable|HTTPS|slow/i.test(text) ? "warn"
-               : /✅|complete|received|saved|verified/i.test(text) ? "success"
-               : "info";
-    window.__enh.toast(text, type, 4500);
-  } else {
-    // enhancements.js not loaded yet — queue into a small buffer and flush later
-    if (!window.__addMsgQueue) window.__addMsgQueue = [];
-    window.__addMsgQueue.push(html);
+  const div = document.createElement("div"); div.className = "msg"; div.innerHTML = html;
+  chatBox.appendChild(div); chatBox.scrollTop = chatBox.scrollHeight;
+}
+
+// ── Toast notification system ─────────────────────────────────────────────────
+// Small, non-blocking toasts in the bottom-right corner. Never covers UI.
+// Types: "info" (blue), "success" (green), "warn" (amber), "error" (red)
+(function injectToastStyles() {
+  if (document.getElementById("toastStyles")) return;
+  const s = document.createElement("style");
+  s.id = "toastStyles";
+  s.innerHTML = `
+    #toastContainer{position:fixed;bottom:24px;right:16px;z-index:9999;display:flex;flex-direction:column;gap:8px;pointer-events:none;max-width:320px;}
+    .tranzo-toast{display:flex;align-items:flex-start;gap:10px;padding:12px 14px;border-radius:14px;font-size:13px;line-height:1.4;font-weight:500;box-shadow:0 4px 20px rgba(0,0,0,.15);pointer-events:auto;animation:toastIn .25s ease;max-width:320px;word-break:break-word;}
+    .tranzo-toast.info{background:#e8f4fd;color:#1565c0;border:1px solid #bbdefb;}
+    .tranzo-toast.success{background:#e8f5e9;color:#1b5e20;border:1px solid #c8e6c9;}
+    .tranzo-toast.warn{background:#fff8e1;color:#e65100;border:1px solid #ffe082;}
+    .tranzo-toast.error{background:#fce4ec;color:#b71c1c;border:1px solid #f8bbd0;}
+    .tranzo-toast .toast-icon{font-size:16px;line-height:1;flex-shrink:0;margin-top:1px;}
+    .tranzo-toast .toast-close{margin-left:auto;padding:0 4px;background:none;border:none;font-size:16px;cursor:pointer;opacity:.5;flex-shrink:0;}
+    .tranzo-toast .toast-close:hover{opacity:1;}
+    @keyframes toastIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+    @keyframes toastOut{to{opacity:0;transform:translateY(8px)}}
+
+    /* Completion popup */
+    #completionPopup{position:fixed;top:0;left:0;width:100%;height:100%;z-index:10000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.35);animation:fadeIn .2s ease;}
+    #completionPopup .cp-card{background:#fff;border-radius:20px;padding:28px 28px 22px;max-width:340px;width:90%;box-shadow:0 20px 60px rgba(0,0,0,.25);text-align:center;animation:popIn .25s ease;}
+    #completionPopup .cp-icon{font-size:48px;margin-bottom:12px;}
+    #completionPopup .cp-title{font-size:20px;font-weight:800;color:#1a1a1a;margin-bottom:8px;}
+    #completionPopup .cp-subtitle{font-size:14px;color:#666;margin-bottom:20px;line-height:1.5;}
+    #completionPopup .cp-stats{display:flex;gap:12px;justify-content:center;margin-bottom:20px;}
+    #completionPopup .cp-stat{background:#f8f8f8;border-radius:14px;padding:14px 20px;flex:1;min-width:100px;}
+    #completionPopup .cp-stat-val{font-size:22px;font-weight:800;color:#ff6b35;}
+    #completionPopup .cp-stat-lbl{font-size:12px;color:#999;margin-top:3px;}
+    #completionPopup .cp-btn{display:inline-block;background:#ff6b35;color:#fff;font-weight:700;font-size:15px;padding:12px 32px;border-radius:12px;border:none;cursor:pointer;width:100%;}
+    #completionPopup .cp-btn:hover{background:#e55a25;}
+    @keyframes fadeIn{from{opacity:0}to{opacity:1}}
+    @keyframes popIn{from{opacity:0;transform:scale(.9)}to{opacity:1;transform:none}}
+  `;
+  document.head.appendChild(s);
+  const container = document.createElement("div");
+  container.id = "toastContainer";
+  document.body.appendChild(container);
+})();
+
+const _toastIcons = { info: "ℹ️", success: "✅", warn: "⚠️", error: "❌" };
+
+function showToast(message, type = "info", duration = 4000) {
+  const container = document.getElementById("toastContainer");
+  if (!container) return;
+  const toast = document.createElement("div");
+  toast.className = `tranzo-toast ${type}`;
+  toast.innerHTML = `<span class="toast-icon">${_toastIcons[type] || "ℹ️"}</span><span>${message}</span><button class="toast-close" onclick="this.closest('.tranzo-toast').remove()">×</button>`;
+  container.appendChild(toast);
+  if (duration > 0) {
+    setTimeout(() => {
+      toast.style.animation = "toastOut .3s ease forwards";
+      setTimeout(() => toast.remove(), 300);
+    }, duration);
   }
+}
+
+function showCompletionPopup({ title, subtitle, stats, btnText = "Done" }) {
+  const existing = document.getElementById("completionPopup");
+  if (existing) existing.remove();
+  const popup = document.createElement("div");
+  popup.id = "completionPopup";
+  const statsHtml = stats.map(s => `
+    <div class="cp-stat">
+      <div class="cp-stat-val">${s.value}</div>
+      <div class="cp-stat-lbl">${s.label}</div>
+    </div>`).join("");
+  popup.innerHTML = `<div class="cp-card">
+    <div class="cp-icon">🎉</div>
+    <div class="cp-title">${title}</div>
+    <div class="cp-subtitle">${subtitle}</div>
+    <div class="cp-stats">${statsHtml}</div>
+    <button class="cp-btn" onclick="document.getElementById('completionPopup')?.remove()">${btnText}</button>
+  </div>`;
+  document.body.appendChild(popup);
+  popup.addEventListener("click", e => { if (e.target === popup) popup.remove(); });
 }
 function addChatBubble({ user, text, mine }) {
   const row = document.createElement("div"); row.className = `msgRow ${mine ? "mine" : "other"}`;
@@ -778,24 +924,6 @@ function showFileOfferNotif(who, fileName, fileSize) {
     // Clicking the notification focuses the tab and shows the modal
     n.onclick = () => { window.focus(); n.close(); };
   } catch {}
-}
-
-function showChatNotif(who, text) {
-  // In-app toast alert (always shown, no permission needed)
-  if (typeof window.__enh !== "undefined" && window.__enh.toast) {
-    window.__enh.toast(`💬 <b>${who}:</b> ${text}`, "info", 5000);
-  }
-  // Browser notification (only when tab is hidden)
-  if (typeof Notification === "undefined") return;
-  if (Notification.permission !== "granted") return;
-  try {
-    const n = new Notification(`💬 ${who}`, {
-      body: text,
-      icon: "/favicon.ico",
-    });
-    n.onclick = () => { window.focus(); n.close(); };
-    setTimeout(() => n.close(), 5000);
-  } catch(e) { console.warn("[Notif] chat notif failed:", e); }
 }
 
 // ─── DEVICE NAME ──────────────────────────────────────────────────────────────
@@ -873,7 +1001,7 @@ if (copyLinkBtn) {
       // Auto-accept: receiver joined via share link — skip manual accept popup
       autoAcceptThisRoom = true;
       try { sessionStorage.setItem(`autoAccept:${roomParam}`, "1"); } catch {}
-      addMsg(`<span class="muted">🔗 Joined via share link — waiting for sender...</span>`);
+      addMsg(`<span class="muted">🔗 Joined via share link — auto-accept enabled. Waiting for sender to share files...</span>`);
     }
 
     joinRoom(roomParam, "join");
@@ -888,6 +1016,18 @@ if (copyLinkBtn) {
 
 // ─── ROOM ─────────────────────────────────────────────────────────────────────
 function joinRoom(roomId, mode) {
+  // Clear the cached save folder when switching rooms — each room session
+  // should pick its own destination folder.
+  if (roomId !== currentRoom) _clearSaveDir();
+  // Reset auto-accept when switching rooms so the new room always shows
+  // the first-file modal (user explicitly consents per room session).
+  if (roomId !== currentRoom) {
+    autoAcceptThisRoom = false;
+    _sessionAutoAccept = false;
+    _sessionSentFiles = 0; _sessionSentBytes = 0; _sessionSentStart = 0;
+    _sessionRecvFiles = 0; _sessionRecvBytes = 0; _sessionRecvStart = 0;
+    try { sessionStorage.removeItem(`autoAccept:${currentRoom || ""}`); } catch {}
+  }
   currentRoom = roomId;
   _openBroadcastChannel(roomId);   // open BC channel for same-device fallback
   loadAutoAcceptFlag();
@@ -895,11 +1035,11 @@ function joinRoom(roomId, mode) {
   chatSection.style.display = "block";
   if (mode === "create") {
     setConnectedUI(false, "Room created", `Room: ${roomId} — Waiting...`);
-    addMsg(`<span class="muted">Room <b>${roomId}</b> created — share the link to invite others.</span>`);
+    addMsg(`<span class="muted">🆕 Room: <b>${roomId}</b> (waiting...)</span>`);
     showShareLink(roomId);   // ← show share link for sender
   } else {
     setConnectedUI(false, "Joining...", `Room: ${roomId}`);
-    addMsg(`<span class="muted">Joining room <b>${roomId}</b>...</span>`);
+    addMsg(`<span class="muted">➡️ Joined: <b>${roomId}</b></span>`);
     hideShareLink();
   }
 }
@@ -907,7 +1047,7 @@ createBtn.onclick = () => { requestNotifPermission(); const id = Math.random().t
 joinBtn.onclick   = () => { requestNotifPermission(); const r = roomInput.value.trim(); if (r) joinRoom(r, "join"); };
 socket.on("room-status", ({ room, users }) => {
   if (room !== currentRoom) return;
-  if (users >= 2) { setConnectedUI(true, "Connected", `Room: ${room} — ${users} user${users>2?"s":""} connected`); addMsg(`<span class="muted">✅ Ready — ${users} people connected.</span>`); }
+  if (users >= 2) { setConnectedUI(true, "Connected", `Room: ${room} — ${users} user${users>2?"s":""} connected`); addMsg(`<span class="muted">✅ ${users} users in room.</span>`); }
   else            { setConnectedUI(false, "Waiting...", `Room: ${room} — Waiting...`); }
 });
 
@@ -943,10 +1083,6 @@ function _openBroadcastChannel(roomId) {
       if (!msg || !msg._bcId) return;
       if (_bcSeen.has(msg._bcId)) return;  // already handled via socket
       _bcSeen.add(msg._bcId);
-      // Route as if it came from the socket
-      if (msg.type === "webrtc-offer")  socket.emit("__bc_route", msg);
-      else if (msg.type === "webrtc-answer") socket.emit("__bc_route", msg);
-      else if (msg.type === "webrtc-ice")    socket.emit("__bc_route", msg);
       // Directly dispatch to our handlers
       if (msg.type === "webrtc-offer")  _handleWebrtcOffer(msg);
       else if (msg.type === "webrtc-answer") _handleWebrtcAnswer(msg);
@@ -960,7 +1096,9 @@ function _bcBroadcast(msg) {
   if (!_bc) return;
   try {
     const id = `${msg.type}-${Date.now()}-${Math.random()}`;
-    _bcSeen.add(id);   // mark as seen so we don't re-process our own
+    // BUG-FIX-8: mark seen BEFORE postMessage so our own echo is always
+    // filtered even if the event loop processes it synchronously.
+    _bcSeen.add(id);
     _bc.postMessage({ ...msg, _bcId: id });
   } catch {}
 }
@@ -982,14 +1120,7 @@ sendBtn.onclick = () => {
   messageInput.value = "";
   socket.emit("stop-typing", { roomId: currentRoom, user: getDeviceName() });
 };
-socket.on("chat-msg", data => {
-  if (data.from !== socket.id) {
-    const who  = data.name || "Peer";
-    const text = data.text || "";
-    addChatBubble({ user: who, text, mine: false });
-    showChatNotif(who, text);
-  }
-});
+socket.on("chat-msg", data => { if (data.from !== socket.id) addChatBubble({ user: data.name || "Peer", text: data.text || "", mine: false }); });
 
 // ─── DRAG & DROP ──────────────────────────────────────────────────────────────
 function enableDragDrop() {
@@ -1026,16 +1157,6 @@ socket.on("connect", () => {
   }
 });
 
-// ── FIX: File picker keepalive ────────────────────────────────────────────────
-// When the user clicks the file input, Android opens the gallery and Chrome
-// freezes all JS timers — Socket.IO can't respond to server pings.
-// We send a keepalive event BEFORE the picker opens so the server knows we are
-// alive, and again when focus/visibility returns so reconnect is triggered fast.
-// Official reference: https://github.com/socketio/socket.io/issues/3507
-fileInput.addEventListener("click", () => {
-  if (socket.connected) socket.emit("keepalive");
-  dlog("[FilePicker] About to open — keepalive sent");
-});
 
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") {
@@ -1044,9 +1165,6 @@ document.addEventListener("visibilitychange", () => {
     if (!socket.connected) {
       dlog("[Visibility] Socket disconnected — forcing reconnect");
       socket.connect();
-    } else {
-      // Still connected — send keepalive to reset server-side ping timer
-      socket.emit("keepalive");
     }
     // If we have a room, re-emit join-room as a safety net
     if (currentRoom && socket.connected) {
@@ -1062,7 +1180,7 @@ function enqueueFilesForSend(files) {
     try { file._qid = file._qid || (crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`); } catch { file._qid = `${Date.now()}-${Math.random()}`; }
     fileQueue.push(file);
     upsertSentItem(file._qid, file.name, file.size, "queued", 0, file.size);
-    addMsg(`<span class="muted">📤 Queued: <b>${file.name}</b> (${fmtBytes(file.size)})</span>`);
+    addMsg(`<span class="muted">📤 Selected: ${file.name} (${fmtBytes(file.size)})</span>`);
   });
   try { renderQueueUI(sending ? outgoingFile : null); } catch {}
   // Broadcast the queue to all room members
@@ -1085,7 +1203,7 @@ resumeBtn.onclick = () => {
   setStatus(`Sending: ${sendState.file?.name || ""}`);
   try {
     fileWorker?.postMessage({ type: "resume" });
-    for (let i = 0; i < NET.pipelineDepth; i++) fileWorker?.postMessage({ type: "pull" });
+    fileWorker?.postMessage({ type: "pull" }); // pull-one-ahead: single seed pull
   } catch {}
 };
 cancelBtn.onclick = () => cancelTransfer("You canceled transfer", true, getDeviceName());
@@ -1108,6 +1226,19 @@ function _clearIceFailTimer(socketId) {
 }
 
 async function createPeerConnectionFor(socketId) {
+  // ── Close any existing peer for this socketId first ──────────────────────
+  // Without this, the old PC's ICE/DC event handlers keep firing after the new
+  // PC is created. Both PCs share the same socketId key, so stale callbacks
+  // from the old PC trigger handlePeerFailed with wrong state, causing the
+  // "ICE connected → disconnected → failed" loop seen after soft resets.
+  const existingPeer = getPeer(socketId);
+  if (existingPeer) {
+    existingPeer.state = "closing";
+    try { existingPeer.dc?.close(); } catch {}
+    try { existingPeer.pc?.close(); } catch {}
+    peerConnections.delete(socketId);
+  }
+
   peerGeneration++;
   const gen = peerGeneration;
   const pc = new RTCPeerConnection(RTC_CONFIG);
@@ -1121,24 +1252,71 @@ async function createPeerConnectionFor(socketId) {
     const s = pc.iceConnectionState;
     dlog("ICE connection:", s, socketId);
 
-    // ── "disconnected" is TRANSIENT — ICE will self-heal via keepalives ──────
-    // Do NOT close or reconnect here. Chrome frequently oscillates
-    // disconnected → checking → connected on flaky wifi. Only act on "failed".
     if (s === "connected" || s === "completed") {
       _clearIceFailTimer(socketId);      // cancel any pending fail handler
-      _clearReconnectTimer(socketId);    // cancel any pending reconnect
+      _clearReconnectTimer(socketId);
       detectAndApplyNetworkProfile(pc);
     }
 
+    if (s === "disconnected") {
+      // "disconnected" is usually transient (flaky wifi, candidate switch).
+      // BUT: if the DC has never opened (we are still in the ICE setup phase
+      // for a fresh file), "disconnected" means the candidate pair collapsed
+      // before SCTP could negotiate. Schedule a faster reconnect (1.5s) so
+      // small files don't wait 5-30s for ICE "failed" to be declared.
+      const peer = getPeer(socketId);
+      const dcNeverOpened = !peer || peer.dc === null || peer.dc?.readyState !== "open";
+      if (dcNeverOpened && (outgoingFile || incomingFile || pendingIncoming)) {
+        _clearIceFailTimer(socketId);
+        const t = setTimeout(() => {
+          _iceFailTimers.delete(socketId);
+          // Suppress if a clean transfer just ended or completely idle
+          if (transferCompleted || gracefulClosing) return;
+          if (!sendState.running && !outgoingFile && !incomingFile && !pendingIncoming) return;
+          // Only act if still disconnected/failed — ignore if ICE recovered
+          const cur = getPeer(socketId)?.pc?.iceConnectionState;
+          if (cur === "disconnected" || cur === "failed" || cur === "closed" || !cur) {
+            dlog("ICE disconnected before DC opened — fast reconnect", socketId);
+            showToast("Connection dropped — reconnecting...", "warn", 3000);
+            handlePeerFailed(socketId);
+          }
+        }, 1500);
+        _iceFailTimers.set(socketId, t);
+      }
+    }
+
     if (s === "failed") {
-      // Debounce 300ms — "disconnected" can briefly look like "failed" on some
-      // browsers before recovering. If it truly fails the timer fires.
+      // Debounce 300ms — transient glitch guard.
       _clearIceFailTimer(socketId);
       const t = setTimeout(() => {
         _iceFailTimers.delete(socketId);
-        // Only handle here — do NOT also handle in onconnectionstatechange
-        // to avoid the double-reconnect race.
-        dlog("ICE truly failed — reconnecting...");
+        // Suppress if a clean transfer just ended
+        if (transferCompleted || gracefulClosing) {
+          dlog("ICE failed suppressed — transferCompleted=" + transferCompleted + " gracefulClosing=" + gracefulClosing, socketId);
+          return;
+        }
+        // Suppress if completely idle — no transfer in any state.
+        // Receiver is passive: sender closes its PC after timeout/complete,
+        // which causes ICE "failed" on the receiver side. If we're not doing
+        // anything, just clean up quietly — the sender will send a new offer.
+        const idle = !sendState.running && !sendState.canceled &&
+                     !outgoingFile && !incomingFile && !pendingIncoming;
+        if (idle) {
+          dlog("ICE failed suppressed — idle receiver, no transfer in progress", socketId);
+          // Quietly close the dead peer without triggering reconnect logic
+          const p = getPeer(socketId);
+          if (p) {
+            p.state = "closing";
+            try { p.dc?.close(); } catch {}
+            try { p.pc?.close(); } catch {}
+            peerConnections.delete(socketId);
+          }
+          // Do NOT null _primaryPeerSocketId — keep it so incoming signaling
+          // messages (new offer from sender) can still be matched.
+          return;
+        }
+        dlog("ICE truly failed — triggering full reconnect", socketId);
+        showToast("Connection lost — reconnecting...", "warn", 3000);
         handlePeerFailed(socketId);
       }, 300);
       _iceFailTimers.set(socketId, t);
@@ -1178,6 +1356,26 @@ function handlePeerFailed(socketId) {
     dlog("handlePeerFailed: retryInProgress — skipping", socketId);
     return;
   }
+
+  // ── Decide whether to reconnect before destroying anything ───────────────
+  // Reconnect if:
+  //   (a) sender: sendState.running (we are actively sending)
+  //   (b) receiver: incomingFile != null (we are actively receiving)
+  // In all other cases (idle, canceled, completed) just close cleanly.
+  // Reconnect if any transfer is in progress at ANY stage:
+  //   (a) sendState.running  — data is actively being sent
+  //   (b) outgoingFile       — file accepted, waiting for DC to open (small files
+  //                            commonly drop here before sendFile() has started)
+  //   (c) incomingFile       — actively receiving chunks
+  //   (d) pendingIncoming    — receiver accepted the offer but startReceiver()
+  //                            hasn't been called yet (DC dropped before first chunk)
+  const shouldReconnect = !transferCompleted && (
+    (sendState.running  && !sendState.canceled) ||
+    (!!outgoingFile     && sending)             ||
+    (!!incomingFile)                            ||
+    (!!pendingIncoming)
+  );
+
   retryInProgress = true;
   _clearReconnectTimer(socketId);
   _clearIceFailTimer(socketId);
@@ -1186,27 +1384,34 @@ function handlePeerFailed(socketId) {
   const attempts = (_reconnectAttempts.get(socketId) || 0) + 1;
   _reconnectAttempts.set(socketId, attempts);
   const delay = Math.min(1000 * Math.pow(2, attempts - 1), 15000);
-  dlog(`handlePeerFailed: attempt ${attempts}, delay ${delay}ms`, socketId);
-  dlog(`handlePeerFailed: connection lost — reconnecting in ${(delay/1000).toFixed(1)}s (attempt ${attempts})...`);
+  dlog(`handlePeerFailed: attempt ${attempts}, delay ${delay}ms, shouldReconnect=${shouldReconnect}`, socketId);
 
   // Close the dead peer BEFORE scheduling reconnect so removePeer's dc.close()
   // doesn't re-trigger dc.onclose → handlePeerFailed again.
-  // We manually mark gracefulClosing for just this peer to suppress the onclose handler.
   const peer = getPeer(socketId);
   if (peer) {
     peer.state = "closing";
     try { peer.dc?.close(); } catch {}
     try { peer.pc?.close(); } catch {}
-    peerConnections.delete(socketId);   // delete directly — don't call removePeer()
-  }
-  if (socketId === _primaryPeerSocketId) {
-    _primaryPeerSocketId = peerConnections.size > 0 ? [...peerConnections.keys()][0] : null;
+    peerConnections.delete(socketId);
   }
 
-  if (!sendState.running || sendState.canceled || transferCompleted) {
+  if (!shouldReconnect) {
+    // When not reconnecting (idle or completed), do NOT null _primaryPeerSocketId.
+    // Keeping it means the next incoming offer from the sender can still be matched
+    // via signaling. Nulling it here caused the receiver to lose its peer reference
+    // and misroute the next webrtc-offer/answer/ice exchange.
     retryInProgress = false;
     return;
   }
+
+  // Only null _primaryPeerSocketId when we're actively reconnecting —
+  // it will be reassigned when makeOfferAndConnect creates the new peer.
+  if (socketId === _primaryPeerSocketId) {
+    _primaryPeerSocketId = null;
+  }
+
+  showToast(`Connection lost — reconnecting... (attempt ${attempts})`, "warn", 4000);
 
   const timer = setTimeout(async () => {
     _reconnectTimers.delete(socketId);
@@ -1229,67 +1434,48 @@ function setupDataChannelFor(socketId, channel, gen) {
 
   channel.onopen = () => {
     dlog("DC open", socketId, "gen", gen);
+    showToast(`Connected to peer`, "success", 2500);
     const peer = getPeer(socketId);
     if (peer) peer.state = "open";
     // Reset backoff — connection is healthy
     _reconnectAttempts.delete(socketId);
     _clearReconnectTimer(socketId);
     _clearIceFailTimer(socketId);
+    startDcKeepalive();   // prevent SCTP 30s idle timeout between files
 
     if (sendState.running && !sendState.canceled) {
-      // ── Distinguish reconnect vs late-joining new peer ───────────────────
-      // A RECONNECT: this socketId already opened a DC for this transfer before.
-      //   → send resume-offset so receiver confirms its byte count, then resume.
-      // A LATE JOIN: new peer that accepted the offer after sendFile() started.
-      //   → send meta so they initialize, wait for "ready", then they receive
-      //     from the current offset onward via broadcastChunk. Do NOT reset
-      //     sendState.offset (that would restart the transfer for everyone).
-      const isReconnect = sendState.knownPeers.has(socketId);
+      // ── Reconnect path: DC reopened mid-transfer ─────────────────────────
+      dlog("[ONOPEN] reconnect — offset=" + sendState.offset + " file=" + (sendState.file?.name || "null"), socketId);
+      showToast(`🔄 Reconnected — resuming transfer`, "info", 3000);
 
-      if (isReconnect) {
-        // ── RECONNECT path ─────────────────────────────────────────────────
-        dlog("DC reopened mid-transfer (reconnect) — offset", sendState.offset);
-
-        if (typeof sendState._onReconnect === "function") {
-          sendState._onReconnect(channel);
-        }
-        try {
-          channel.send(JSON.stringify({ type: "resume-offset", offset: sendState.offset }));
-          dlog("sent resume-offset request to receiver");
-        } catch(e) { dlog("resume-offset send failed:", e); }
-
-      } else {
-        // ── LATE JOIN path ──────────────────────────────────────────────────
-        // New peer accepted the offer after the transfer started.
-        // Send them meta so they set up incomingFile, then they'll send "ready".
-        // They join the broadcastChunk mesh from this point on — they receive
-        // all chunks from sendState.offset onward (partial file).
-        // We do NOT reset sendState.offset or touch the worker.
-        dlog("DC opened for late-joining peer — current offset", sendState.offset, socketId);
-        const file = sendState.file;
-        if (file) {
-          try {
-            channel.send(JSON.stringify({ type: "meta", meta: {
-              id:   file._qid || `${file.name}|${file.size}`,
-              name: file.name, size: file.size,
-              type: file.type || "application/octet-stream",
-              resumeFrom: sendState.offset,   // receiver can skip to this offset
-            }}));
-          } catch(e) { dlog("late-join meta send failed:", e); }
-        }
+      if (typeof sendState._onReconnect === "function") {
+        sendState._onReconnect(channel);
       }
+      try {
+        channel.send(JSON.stringify({ type: "resume-offset", offset: sendState.offset }));
+      } catch(e) { dlog("resume-offset send failed:", e); }
 
       sendState.knownPeers.add(socketId);
 
     } else if (outgoingFile && !sendState.running) {
       // ── FRESH start: first connection for this file ───────────────────────
+      dlog("[ONOPEN] FRESH START path — outgoingFile=" + outgoingFile.name +
+        " sendState.running=" + sendState.running +
+        " sending=" + sending, socketId);
       sendState.knownPeers.add(socketId);
       sendFile(outgoingFile).catch(console.error);
+    } else {
+      // ── No-op path — log why we skipped both branches ──────────────────────
+      dlog("[ONOPEN] NO-OP — sendState.running=" + sendState.running +
+        " canceled=" + sendState.canceled +
+        " outgoingFile=" + (outgoingFile?.name || "null") +
+        " sending=" + sending, socketId);
     }
   };
 
   channel.onclose = () => {
     dlog("DC closed", socketId, "gen", gen);
+    stopDcKeepalive();
 
     // ── Ignore expected closes ────────────────────────────────────────────────
     // 1. gracefulClosing: we initiated the close (transfer done / cancel)
@@ -1302,7 +1488,34 @@ function setupDataChannelFor(socketId, channel, gen) {
     const peer = getPeer(socketId);
     if (peer?.state === "closing") return;
 
-    dlog("DC closed unexpected", socketId, "gen", gen);
+    // ── Idle close — sender closed its PC, we are a passive receiver ─────────
+    // If no transfer is in progress at all, the sender closed its connection
+    // after its own timeout/complete cycle. Don't reconnect — just clean up
+    // quietly and wait for the next incoming offer.
+    const isIdle = !sendState.running && !sendState.canceled &&
+                   !outgoingFile && !incomingFile && !pendingIncoming;
+    if (isIdle) {
+      dlog("DC closed while idle — passive close, no reconnect needed", socketId);
+      // If we received files this session and haven't shown the popup yet, show it now.
+      if (_sessionRecvFiles > 0) {
+        const _popupFiles   = _sessionRecvFiles;
+        const _popupBytes   = _sessionRecvBytes;
+        const _popupElapsed = (_sessionRecvStart > 0) ? Math.round((performance.now() - _sessionRecvStart) / 1000) : 0;
+        _sessionRecvFiles = 0; _sessionRecvBytes = 0; _sessionRecvStart = 0;
+        setTimeout(() => showCompletionPopup({
+          title: "All Files Received! 🎉",
+          subtitle: `${_popupFiles} file${_popupFiles !== 1 ? "s" : ""} (${fmtBytes(_popupBytes)}) saved successfully.`,
+          stats: [
+            { value: _popupFiles.toString(), label: _popupFiles !== 1 ? "Files Received" : "File Received" },
+            { value: `${_popupElapsed}s`, label: "Time Taken" },
+          ],
+          btnText: "Great!",
+        }), 300);
+      }
+      return;
+    }
+
+    addMsg(`<span class="muted">⚠️ DataChannel closed (${socketId.slice(0,6)})</span>`);
     // Only trigger reconnect if we're mid-transfer and not already handling it
     if (sendState.running && !sendState.canceled && !retryInProgress) {
       handlePeerFailed(socketId);
@@ -1344,7 +1557,10 @@ function setupDataChannelFor(socketId, channel, gen) {
         return;
       }
       if (msg.type === "complete") {
+        if (doneResendTimer) { clearInterval(doneResendTimer); doneResendTimer = null; }
         sendState.gotComplete = true;
+        dlog("[COMPLETE] received from receiver — file=" + (sendState.file?.name || "null") +
+          " running=" + sendState.running + " offset=" + sendState.offset);
         transferCompleted = true;
         setStatus(`✅ Sent: ${sendState.file?.name || ""}`);
         try { const f = sendState.file; if (f) { upsertSentItem(f._qid || `${f.name}|${f.size}`, f.name, f.size, "done", f.size, f.size); renderQueueUI(null); } } catch {}
@@ -1352,9 +1568,34 @@ function setupDataChannelFor(socketId, channel, gen) {
         etaText.innerText = "Remaining: 0m 0s";
         sendState.running = false; outgoingFile = null;
         pauseBtn.disabled = true; resumeBtn.disabled = true; cancelBtn.disabled = true;
-        safeCloseAllPeers();
-        sending = false; transferCompleted = false;
-        setTimeout(() => startNextFile(), 900);
+
+        // Track session stats
+        if (!_sessionSentStart) _sessionSentStart = performance.now();
+        _sessionSentFiles++;
+        _sessionSentBytes += sendState.file?.size || 0;
+
+        if (fileQueue.length > 0) {
+          softResetForNextFile();
+        } else {
+          safeCloseAllPeers();
+          // Capture values NOW before resetting — setTimeout reads vars by reference,
+          // not by value, so resetting before the callback fires gave "0 files".
+          const _popupFiles = _sessionSentFiles;
+          const _popupBytes = _sessionSentBytes;
+          const _popupElapsed = (_sessionSentStart > 0) ? Math.round((performance.now() - _sessionSentStart) / 1000) : 0;
+          _sessionSentFiles = 0; _sessionSentBytes = 0; _sessionSentStart = 0;
+          setTimeout(() => showCompletionPopup({
+            title: "All Files Sent! 🎉",
+            subtitle: `${_popupFiles} file${_popupFiles !== 1 ? "s" : ""} (${fmtBytes(_popupBytes)}) delivered to the receiver.`,
+            stats: [
+              { value: _popupFiles.toString(), label: _popupFiles !== 1 ? "Files Sent" : "File Sent" },
+              { value: `${_popupElapsed}s`, label: "Time Taken" },
+            ],
+            btnText: "Done",
+          }), 400);
+        }
+        sending = false;
+        setTimeout(() => startNextFile(), 200);
         return;
       }
       if (msg.type === "done")   { await finalizeIncomingIfReady(msg.sha256 || null); return; }
@@ -1383,7 +1624,8 @@ function setupDataChannelFor(socketId, channel, gen) {
           // align, we'd accept duplicate bytes or skip bytes → corruption.
           // Snapping to floor(receivedBytes / chunkSize) * chunkSize ensures
           // we only claim bytes from complete chunks.
-          const chunkSz  = NET.chunkSize || 262144;
+          // BUG-FIX-4: use recorded chunkSize, not NET.chunkSize which may have been resized.
+          const chunkSz  = incomingFile.chunkSize || NET.chunkSize || 262144;
           const aligned  = Math.floor(incomingFile.receivedBytes / chunkSz) * chunkSz;
 
           if (aligned < incomingFile.receivedBytes) {
@@ -1459,6 +1701,11 @@ async function makeOfferAndConnect(targetSocketId) {
 
 async function _handleWebrtcOffer({ from, sdp, resume }) {
   _primaryPeerSocketId = from;
+  // Cancel any stale ICE-fail or reconnect timers for this peer before creating
+  // a new PC. Timers from the old (dying) PC can fire after the new PC is set up
+  // and call handlePeerFailed on the new connection, causing immediate ICE failure.
+  _clearIceFailTimer(from);
+  _clearReconnectTimer(from);
   const pc = await createPeerConnectionFor(from);
   await pc.setRemoteDescription(sdp);
 
@@ -1492,30 +1739,63 @@ async function _handleWebrtcIce({ from, candidate }) {
   } catch(e) { dlog("addIceCandidate error:", e); }
 }
 
-socket.on("webrtc-offer",  msg => _handleWebrtcOffer(msg));
-socket.on("webrtc-answer", msg => _handleWebrtcAnswer(msg));
-socket.on("webrtc-ice",    msg => { _handleWebrtcIce(msg); });
+socket.on("webrtc-offer",  msg => _handleWebrtcOffer(msg).catch(e => dlog("[SIGNAL] webrtc-offer handler error:", e)));
+socket.on("webrtc-answer", msg => _handleWebrtcAnswer(msg).catch(e => dlog("[SIGNAL] webrtc-answer handler error:", e)));
+socket.on("webrtc-ice",    msg => { _handleWebrtcIce(msg).catch(e => dlog("[SIGNAL] webrtc-ice handler error:", e)); });
 
 // ─── SAFE CLOSE ───────────────────────────────────────────────────────────────
-function safeCloseAllPeers() {
+// ── CONNECTION REUSE ──────────────────────────────────────────────────────────
+// Closing and re-opening a WebRTC PeerConnection between files costs 2-8s of
+// ICE negotiation and is the primary cause of "connection failed" errors when
+// transferring multiple large files. Instead:
+//   • If another file is queued: keep the existing DC alive, just reset state.
+//   • If the queue is empty (or on cancel/error): close normally.
+//
+// safeCloseAllPeers() is now split into two functions:
+//   softResetForNextFile() — resets transfer state, keeps DC open
+//   safeCloseAllPeers()   — hard close, only called when queue is empty or on error
+
+function softResetForNextFile() {
+  dlog("[SOFT-RESET] keeping DC alive for next file");
   stopRttPolling();
+  if (doneResendTimer) { clearInterval(doneResendTimer); doneResendTimer = null; }
+  resetReceiverReady();
+  retryInProgress = false;
+  if (_primaryPeerSocketId) {
+    _reconnectAttempts.delete(_primaryPeerSocketId);
+    _clearReconnectTimer(_primaryPeerSocketId);
+    _clearIceFailTimer(_primaryPeerSocketId);
+  }
+  sendState.knownPeers = new Set();
+  sendState._onReconnect = null;
+  sendState._onResumeConfirmed = null;
+  sendState._queueRafId = null;
+  // Keep pc, dc, _primaryPeerSocketId — reused for next file
+}
+
+function safeCloseAllPeers() {
+  dlog("[SAFE-CLOSE] running=" + sendState.running + " file=" + (sendState.file?.name || outgoingFile?.name || "null"));
+  stopRttPolling();
+  stopDcKeepalive();
   gracefulClosing = true;
   peerGeneration++;
-  // Cancel any pending reconnect/ICE-fail timers before closing
-  for (const sid of peerConnections.keys()) {
-    _clearReconnectTimer(sid);
-    _clearIceFailTimer(sid);
-    _reconnectAttempts.delete(sid);
+  if (_primaryPeerSocketId) {
+    _clearReconnectTimer(_primaryPeerSocketId);
+    _clearIceFailTimer(_primaryPeerSocketId);
+    _reconnectAttempts.delete(_primaryPeerSocketId);
+    removePeer(_primaryPeerSocketId);
   }
-  for (const sid of peerConnections.keys()) removePeer(sid);
   _primaryPeerSocketId = null;
   if (doneResendTimer) { clearInterval(doneResendTimer); doneResendTimer = null; }
   resetReceiverReady();
   retryInProgress = false;
+  sendState.knownPeers = new Set();
+  sendState._onReconnect = null;
+  sendState._onResumeConfirmed = null;
+  sendState._queueRafId = null;
   setTimeout(() => (gracefulClosing = false), 800);
 }
 
-// Keep legacy alias
 function safeClosePeer() { safeCloseAllPeers(); }
 
 function cancelTransfer(reason, notifyPeer, canceledBy) {
@@ -1530,12 +1810,12 @@ function cancelTransfer(reason, notifyPeer, canceledBy) {
     // Terminate the worker entirely — prevents ghost onmessage callbacks on next transfer
     try { fileWorker?.terminate(); } catch {}
     fileWorker = null;
-    broadcastMsg({ type: "cancel", by: canceledBy || getDeviceName() });
+    sendMsg({ type: "cancel", by: canceledBy || getDeviceName() });
     if (notifyPeer) socket.emit("file-cancel", { room: currentRoom, by: canceledBy || getDeviceName(), reason });
   }
   incomingFile = null;
   setStatus("❌ Transfer canceled");
-  resetTransferUI(); noSleepStop(); safeCloseAllPeers();
+  resetTransferUI(); safeCloseAllPeers();
   addMsg(`<span class="muted">❌ ${reason}</span>`);
   try { const f = sendState?.file || outgoingFile; if (f) { upsertSentItem(f._qid || `${f.name}|${f.size}`, f.name, f.size, "canceled", sendState?.ackBytes || 0, f.size); renderQueueUI(null); } } catch {}
 }
@@ -1561,7 +1841,14 @@ function waitForBufferDrain(channel) {
 function updateSenderUIByAck() {
   const file = sendState.file; if (!file) return;
   setProgressBytes(sendState.ackBytes, file.size);
-  try { upsertSentItem(file._qid || `${file.name}|${file.size}`, file.name, file.size, "sending", sendState.ackBytes, file.size); renderQueueUI(file); } catch {}
+  // Throttle queue UI — renderQueueUI rebuilds innerHTML; RAF-throttle it
+  if (!sendState._queueRafId) {
+    sendState._queueRafId = requestAnimationFrame(() => {
+      sendState._queueRafId = null;
+      if (!sendState.file) return;
+      try { upsertSentItem(sendState.file._qid || `${sendState.file.name}|${sendState.file.size}`, sendState.file.name, sendState.file.size, "sending", sendState.ackBytes, sendState.file.size); renderQueueUI(sendState.file); } catch {}
+    });
+  }
   const now = performance.now(); const dt = (now - sendState.lastAckTickT) / 1000;
   if (!sendState.lastAckTickT) { sendState.lastAckTickT = now; sendState.lastAckTickB = sendState.ackBytes; return; }
   if (dt >= 1.0) {
@@ -1578,21 +1865,75 @@ function updateSenderUIByAck() {
 function startNextFile() {
   if (sending || fileQueue.length === 0) return;
   const file = fileQueue.shift();
-  // Update broadcast queue — first file is now sending, rest still pending
+  dlog("[QUEUE] startNextFile — starting:", file.name, "queue remaining:", fileQueue.length,
+    "sendState.running=" + sendState.running, "dc=" + (window.dc?.readyState || "none"));
   try { if (typeof window.multiroomBroadcastQueue === "function") window.multiroomBroadcastQueue(fileQueue.map(f => ({ name: f.name, size: f.size }))); } catch {}
   sending = true;
-  transferCompleted = false; gracefulClosing = false;
+  // BUG-FIX-RECONNECT: reset transferCompleted HERE (not in the complete handler).
+  // Resetting it earlier caused dc.onclose (which fires after safeCloseAllPeers)
+  // to see transferCompleted=false and trigger handlePeerFailed → reconnect loop.
+  transferCompleted = false;
+  gracefulClosing = false;
   resetReceiverReady(); retryInProgress = false;
   outgoingFile = file;
   resetTransferUI();
+
+  // ── FAST PATH: reuse existing open DataChannel ───────────────────────────
+  // If the previous transfer left the DC open (softResetForNextFile was used),
+  // skip the entire offer/answer/ICE cycle and go straight to sendFile().
+  // This eliminates the 2-8s re-connection delay between consecutive files.
+  const existingDc = window.dc;
+  if (existingDc?.readyState === "open" && _primaryPeerSocketId) {
+    dlog("[QUEUE] DC already open — reusing connection, skipping ICE for", file.name);
+    setStatus(`Sending: ${file.name} (${fmtBytes(file.size)})`);
+    sendState.knownPeers.add(_primaryPeerSocketId);
+    sendFile(file).catch(console.error);
+    return;
+  }
+
+  // ── SLOW PATH: full offer/answer/ICE negotiation ─────────────────────────
   setStatus(`Waiting for receiver... (${file.name}, ${fmtBytes(file.size)})`);
   try { renderQueueUI(file); } catch {}
-  if (!checkRateLimit()) { addMsg(`<span class="muted">⚠️ Rate limit: too many file offers. Wait a moment.</span>`); sending = false; return; }
   socket.emit("file-offer", { id: file._qid || `${file.name}|${file.size}`, name: file.name, size: file.size, type: file.type || "application/octet-stream" });
+
+  // ── Watchdog: re-emit file-offer if DC never opens within 15s ────────────
+  // Covers the case where the webrtc-answer is lost (ICE stuck at "gathering:
+  // complete" with no "checking") due to signaling races or socket reconnects.
+  const _watchdogFile = file;
+  const _watchdogTimer = setTimeout(() => {
+    // Only retry if this file is still the outgoing file and DC is still closed
+    if (outgoingFile === _watchdogFile && sending && !sendState.running) {
+      const dcState = window.dc?.readyState;
+      if (!dcState || dcState !== "open") {
+        dlog("[WATCHDOG] DC never opened for", _watchdogFile.name, "— re-emitting file-offer");
+        showToast(`Connection stalled — retrying...`, "warn", 3000);
+        // Close stale peer if any, then re-offer
+        if (_primaryPeerSocketId) {
+          _clearIceFailTimer(_primaryPeerSocketId);
+          _clearReconnectTimer(_primaryPeerSocketId);
+          const p = getPeer(_primaryPeerSocketId);
+          if (p) { p.state = "closing"; try { p.dc?.close(); } catch {} try { p.pc?.close(); } catch {} peerConnections.delete(_primaryPeerSocketId); }
+        }
+        socket.emit("file-offer", { id: _watchdogFile._qid || `${_watchdogFile.name}|${_watchdogFile.size}`, name: _watchdogFile.name, size: _watchdogFile.size, type: _watchdogFile.type || "application/octet-stream" });
+      }
+    }
+  }, 15000);
+
+  // Cancel watchdog as soon as DC opens (normal path)
+  const _cancelWatchdog = () => clearTimeout(_watchdogTimer);
+  const _origOnDcOpen = Peer?.PeerEvents?.onDcOpen;  // in case peer.js is used
+  // Use a one-shot listener on the peerConnections map via onopen inside setupDataChannelFor
+  // The watchdog self-cancels when sendState.running becomes true
+  const _watchdogPoll = setInterval(() => {
+    if (!sending || outgoingFile !== _watchdogFile || sendState.running || window.dc?.readyState === "open") {
+      clearInterval(_watchdogPoll);
+      clearTimeout(_watchdogTimer);
+    }
+  }, 500);
 }
 
 // ─── FILE OFFER / ACCEPT ──────────────────────────────────────────────────────
-socket.on("file-offer", ({ from, fromName, fromShort, meta }) => {
+socket.on("file-offer", async ({ from, fromName, fromShort, meta }) => {
   pendingIncoming = { from, meta };
   try { const id = meta?.id || `${meta?.name}|${meta?.size}`; upsertRecvItem(id, meta?.name, meta?.size || 0, "pending", 0, meta?.size || 0); renderRecvQueueUI(); } catch {}
   const who = fromName || fromShort || (from ? from.substring(0, 5) : "User");
@@ -1600,28 +1941,32 @@ socket.on("file-offer", ({ from, fromName, fromShort, meta }) => {
   // Fire background notification (no-op when tab is visible or permission denied)
   showFileOfferNotif(who, meta?.name || "file", meta?.size || 0);
 
-  // ── Solo/multi modal rule (set by multiroom.js) ───────────────────────────
-  // Solo room (1 peer): skip modal after first accept — auto-accept subsequent files.
-  // Multi room (2+ peers): always show modal so each user explicitly decides.
-  // window.__mrShouldShowModal is set by multiroom.js before this handler fires.
-  const showModal = (typeof window.__mrShouldShowModal !== "undefined")
+  // ── Auto-accept logic ─────────────────────────────────────────────────────
+  // After the user clicks Accept once per session (_sessionAutoAccept = true),
+  // all subsequent file offers are accepted automatically without any modal.
+  // For large files (>MEMORY_MAX_BYTES), _getSaveDir() has already been called
+  // and the folder handle is cached — no second picker needed.
+  // The very first offer (or if session auto-accept was never triggered) always
+  // shows the modal so the user explicitly consents.
+  //
+  // Legacy multiroom.js hook: __mrShouldShowModal=false means solo-room
+  // already handled accept for us. We still respect that.
+  const mrOverride = (typeof window.__mrShouldShowModal !== "undefined")
     ? window.__mrShouldShowModal
-    : true;
+    : undefined;
 
-  if (!showModal) {
-    // Solo room, first already done — auto-accept without modal
-    addMsg(`<span class="muted">✅ Auto-accepted from <b>${who}</b>: ${meta.name} (${fmtBytes(meta.size)})</span>`);
-    socket.emit("file-answer", { to: from, accepted: true });
-    _primaryPeerSocketId = from;
-    pendingIncoming = null;
-    setStatus("Auto-accepted. Connecting P2P...");
+  const shouldAutoAccept = _sessionAutoAccept || mrOverride === false;
+
+  if (shouldAutoAccept) {
+    addMsg(`<span class="muted">✅ Auto-accepted: <b>${meta?.name}</b> (${fmtBytes(meta?.size || 0)}) from <b>${who}</b></span>`);
+    await _acceptPendingFile();
+    window.__mrShouldShowModal = undefined;
     return;
   }
 
-  // Show modal — user must explicitly accept/reject
+  // Show modal — user must explicitly accept/reject this first file
   modalInfo.innerText = `From: ${who}\nFile: ${meta.name}\nSize: ${fmtBytes(meta.size)}\nType: ${meta.type}`;
   modalBg.style.display = "flex";
-  // Reset flag so next offer re-evaluates
   window.__mrShouldShowModal = undefined;
 });
 
@@ -1632,61 +1977,83 @@ rejectBtn.onclick = () => {
   pendingIncoming = null; modalBg.style.display = "none";
 };
 
-acceptBtn.onclick = async () => {
+// ── Session-level auto-accept flag ───────────────────────────────────────────
+// Set to true when user clicks Accept for the first time in a session.
+// All subsequent file offers are auto-accepted without showing the modal.
+// The user only needs to pick a save folder once (for large files) — _getSaveDir()
+// caches the handle for the entire session.
+let _sessionAutoAccept = false;
+
+// ── Disk prep synchronization ─────────────────────────────────────────────────
+// _acceptPendingFile emits file-answer immediately (to start ICE right away),
+// then calls showDirectoryPicker in the background. The DC can open and meta
+// can arrive while that picker is still open. startReceiver must wait for this
+// promise before attempting its own _createWritableInDir, otherwise both code
+// paths call showDirectoryPicker concurrently → NotAllowedError: File picker
+// already active → pendingWritable stays null → "Save location missing".
+let _diskPrepPromise = null;   // Promise<void> | null
+
+// Shared helper: accept a pending file offer (used by acceptBtn and auto-accept).
+async function _acceptPendingFile() {
   if (!pendingIncoming) return;
   transferCompleted = false; gracefulClosing = false; resetReceiverReady(); retryInProgress = false;
-  const meta = pendingIncoming.meta;
-  const canDisk = "showSaveFilePicker" in window && window.isSecureContext;
-  let writable = null;
+  const { from, meta } = pendingIncoming;
 
-  // BUG FIX 1: Only ask for save location for LARGE files (>300MB).
-  // Small files use in-memory Blob + auto a.click() download — no dialog needed.
-  // Asking showSaveFilePicker for every file causes Android to open a second
-  // file picker overlay which confuses users and breaks the flow.
-  if (canDisk && meta.size > MEMORY_MAX_BYTES) {
-    try {
-      const handle = await window.showSaveFilePicker({ suggestedName: meta.name });
-      writable = await handle.createWritable();
-      addMsg(`<span class="muted">💾 Save location set. Connecting...</span>`);
-    } catch {
-      addMsg(`<span class="muted">❌ Save dialog canceled.</span>`);
-      socket.emit("file-answer", { to: pendingIncoming.from, accepted: false });
-      pendingIncoming = null; modalBg.style.display = "none"; return;
-    }
-  } else if (!canDisk && meta.size > MEMORY_MAX_BYTES) {
-    // Large file but no File System Access API (non-HTTPS or old browser)
-    addMsg(`<span class="muted">⚠️ Large file needs HTTPS for disk saving.</span>`);
-    socket.emit("file-answer", { to: pendingIncoming.from, accepted: false });
-    pendingIncoming = null; modalBg.style.display = "none"; return;
+  // ── Accept immediately — start P2P handshake right away ──────────────────
+  if (pendingWritable) {
+    try { pendingWritable.abort?.(); } catch {}
+    pendingWritable = null;
   }
-  // Small files: writable stays null → finalize will use Blob + a.click()
-
-  pendingWritable = writable;
-  socket.emit("file-answer", { to: pendingIncoming.from, accepted: true });
-  // BUG FIX 2: Do NOT set autoAcceptThisRoom here.
-  // Auto-accept was causing the second file offer to skip the modal entirely,
-  // meaning the receiver never saw the Accept button for file #2, #3, etc.
-  // Each file transfer must show the modal so the user can explicitly accept.
-  _primaryPeerSocketId = pendingIncoming.from;
-  pendingIncoming = null; modalBg.style.display = "none";
+  pendingIncoming = null;
+  modalBg.style.display = "none";
+  _primaryPeerSocketId = from;
+  socket.emit("file-answer", { to: from, accepted: true });
   setStatus("Accepted. Connecting P2P...");
-  addMsg(`<span class="muted">Accepted. Establishing P2P connection...</span>`);
+
+  // ── Prepare disk storage in parallel with ICE negotiation ────────────────
+  // Signal startReceiver to wait for this before trying its own picker.
+  const canDisk = "showDirectoryPicker" in window && window.isSecureContext;
+  if (meta.size > MEMORY_MAX_BYTES && canDisk) {
+    let _diskPrepResolve;
+    _diskPrepPromise = new Promise(r => { _diskPrepResolve = r; });
+    try {
+      pendingWritable = await _createWritableInDir(meta.name);
+      const dirName = _saveDir?.name || "chosen folder";
+      addMsg(`<span class="muted">💾 Saving to folder <b>${dirName}</b> → ${meta.name}</span>`);
+    } catch {
+      addMsg(`<span class="muted">❌ Save folder not chosen — file will be received in memory if possible.</span>`);
+    } finally {
+      _diskPrepResolve();   // always resolve so startReceiver is never stuck
+      _diskPrepPromise = null;
+    }
+  } else if (meta.size > MEMORY_MAX_BYTES) {
+    addMsg(`<span class="muted">⚠️ Large file needs HTTPS + a modern browser for disk saving.</span>`);
+  }
+  // Small files: pendingWritable stays null → finalize uses Blob + a.click()
+}
+
+acceptBtn.onclick = async () => {
+  if (!pendingIncoming) return;
+  // Mark session-level auto-accept so all future files skip the modal
+  _sessionAutoAccept = true;
+  addMsg(`<span class="muted">📥 Accepted. Auto-accept enabled for this session — all further files will be received automatically.</span>`);
+  await _acceptPendingFile();
 };
 
 socket.on("file-answer", async ({ from, accepted }) => {
   if (!accepted) {
-    addMsg(`<span class="muted">❌ The receiver declined the file.</span>`);
-    // Only clear outgoingFile if no transfer is running and no peers accepted yet
+    addMsg(`<span class="muted">❌ ${from ? from.substring(0,6) : "Peer"} rejected.</span>`);
     if (!sendState.running && peerConnections.size === 0) {
       setStatus("Receiver rejected.");
       outgoingFile = null;
+      sending = false;   // unblock queue so next file can be offered
     }
     return;
   }
   // Don't overwrite _primaryPeerSocketId if transfer already running with another peer
   if (!_primaryPeerSocketId) _primaryPeerSocketId = from;
   setStatus("Accepted. Connecting P2P...");
-  addMsg(`<span class="muted">Connecting to peer...</span>`);
+  addMsg(`<span class="muted">📤 Accepted by ${from ? from.substring(0,6) : "peer"}. Connecting P2P...</span>`);
   await makeOfferAndConnect(from);
 });
 
@@ -1720,13 +2087,15 @@ async function sendFile(file) {
   sendState.offset = 0; sendState.file = file; sendState.ackBytes = 0;
   sendState.lastAckTickT = 0; sendState.lastAckTickB = 0; sendState.ackEma = 0;
   sendState.gotComplete = false; sendState.chunkIndex = 0;
+  sendState.startChunkSize = 0;
   sendState.pendingRetransmits = new Map();
   sendState.knownPeers = new Set();
+  if (!_sessionSentStart) _sessionSentStart = performance.now(); // track session start
 
-  noSleepStart();
+
   resetReceiverReady(); retryInProgress = false;
 
-  broadcastMsg({ type: "meta", meta: {
+  sendMsg({ type: "meta", meta: {
     id: file._qid || `${file.name}|${file.size}`,
     name: file.name, size: file.size,
     type: file.type || "application/octet-stream"
@@ -1742,10 +2111,16 @@ async function sendFile(file) {
   // chunkQueue/workerDone/allSent variables) still being alive and receiving
   // chunk messages → two send-loops running in parallel → interleaved data
   // → corrupted file on the receiver.
+  // BUG-FIX-WORKER: terminate() stops the worker thread but already-queued
+  // onmessage events (e.g. 28 buffered "pull" responses) are still delivered
+  // to the old closure. A generation token lets each onmessage handler
+  // immediately discard events that belong to a previous sendFile() call.
   if (fileWorker) {
     try { fileWorker.postMessage({ type: "cancel" }); } catch {}
     try { fileWorker.terminate(); } catch {}
+    fileWorker = null;
   }
+  const _workerGen = ++sendState._workerGen;   // unique stamp for THIS transfer
   fileWorker = new Worker("worker.js");
 
   // ── Send-loop state ───────────────────────────────────────────────────────
@@ -1753,7 +2128,8 @@ async function sendFile(file) {
   let   workerDone   = false;
   let   allSent      = false;
   let   loopRunning  = false;
-  let   waitingDrain = false;     // true while we're blocked waiting for bufferedamountlow
+  let   waitingDrain = false;     // true while we're blocked on SCTP drain
+  let   _sendBackoff = 50;        // ms — exponential backoff for send-queue-full
   let   currentDepth = NET.pipelineDepth;
   let   _lastSampleT = performance.now();
   let   _lastSampleB = 0;
@@ -1766,39 +2142,47 @@ async function sendFile(file) {
   applyThreshold();
 
   // ── SEND LOOP ─────────────────────────────────────────────────────────────
+  // Design: pull-one-ahead model.
+  // We send one chunk, then pull one more from the worker — keeping exactly
+  // one chunk pre-loaded. This means chunkQueue stays at 1 entry, SCTP never
+  // sees more than one chunk queued at a time in JS memory, and the SCTP
+  // "send queue is full" error is eliminated entirely.
+  //
+  // Flow control is via dc.bufferedAmount:
+  //   - if bufferedAmount >= HWM: pause, wait for bufferedamountlow event
+  //   - if dc.send throws: backoff and retry (last resort)
+  //   - otherwise: send immediately and pull next chunk
+  //
+  // The pipeline depth (currentDepth) still controls how far ahead the
+  // worker reads — but chunkQueue is bounded to 1 entry at any time.
   function sendLoop() {
     if (!sendState.running || sendState.canceled || allSent) return;
     if (loopRunning || waitingDrain) return;
     loopRunning = true;
 
+    let dc = getDc();
+
     while (chunkQueue.length > 0) {
       if (sendState.paused || sendState.canceled) break;
 
-      const dc = getDc();
+      if (!dc) dc = getDc();
       if (!dc) {
-        // DC not open — wait for reconnect; _attachDrainListener will re-kick us
         dlog("[SEND] DC not open — waiting for reconnect");
+        waitingDrain = false;
         break;
       }
 
-      // ── THE CORRECT CHECK: read dc.bufferedAmount directly ────────────────
-      // Don't use a separate counter. Chrome's SCTP bufferedAmount is accurate
-      // for flow control; just check it before each send.
+      // ── Backpressure check BEFORE dequeuing ───────────────────────────────
+      // Check bufferedAmount every chunk — not just at HWM. This prevents
+      // sending more chunks than SCTP can absorb in a single event loop tick.
       if (dc.bufferedAmount >= NET.highWaterMark) {
-        // Register a one-shot drain listener then stop the loop.
-        // The listener will call sendLoop() again once the buffer drains.
         waitingDrain = true;
-        dlog("[SEND] HWM — pausing until bufferedamountlow", {
-          buffered: (dc.bufferedAmount / 1024 / 1024).toFixed(2) + "MB",
-          hwm: (NET.highWaterMark / 1024 / 1024).toFixed(2) + "MB"
-        });
         const onLow = () => {
           dc.removeEventListener("bufferedamountlow", onLow);
           waitingDrain = false;
           sendLoop();
         };
         dc.addEventListener("bufferedamountlow", onLow);
-        // Safety fallback: if the event never fires (e.g. DC closes) unblock after 2s
         setTimeout(() => {
           if (!waitingDrain) return;
           waitingDrain = false;
@@ -1810,35 +2194,48 @@ async function sendFile(file) {
 
       const { buf: rawBuf, index } = chunkQueue.shift();
 
-      // ── FIX 1: Trim final chunk to exact remaining bytes ──────────────────
-      // Worker slices file at fixed chunkSize boundaries. With a deep pipeline
-      // (depth 32) all chunks are pre-queued — a full-size chunk lands on the
-      // receiver after only a partial amount of file data remains, pushing
-      // receivedBytes past meta.size → overflow guard discards it → stuck/corrupt.
       const bytesLeftToSend = file.size - sendState.offset;
       const buf = (rawBuf.byteLength > bytesLeftToSend && bytesLeftToSend > 0)
         ? rawBuf.slice(0, bytesLeftToSend)
         : rawBuf;
 
-      // Keep last 64 chunks for potential retransmit (trimmed buf is authoritative)
+      // Retransmit ring buffer
+      const _ringSize = Math.max(currentDepth * 4, 256);
       sendState.pendingRetransmits.set(index, buf);
-      if (sendState.pendingRetransmits.size > 64) {
-        sendState.pendingRetransmits.delete(sendState.pendingRetransmits.keys().next().value);
+      if (sendState.pendingRetransmits.size > _ringSize) {
+        sendState.pendingRetransmits.delete(index - _ringSize);
       }
+      window.__xferRetransmits = sendState.pendingRetransmits;
 
       try {
-        broadcastChunk(buf);
+        dc.send(buf);
       } catch(err) {
         chunkQueue.unshift({ buf: rawBuf, index });
         dlog("[SEND] dc.send threw:", err?.message);
-        break;
+        waitingDrain = true;
+        loopRunning  = false;
+        _sendBackoff = Math.min(_sendBackoff * 2, 1000);
+        setTimeout(() => {
+          if (!waitingDrain) return;
+          waitingDrain = false;
+          sendLoop();
+        }, _sendBackoff);
+        return;
       }
+      _sendBackoff = 50;
 
-      sendState.offset    = Math.min(file.size, sendState.offset + buf.byteLength);
+      sendState.offset     = Math.min(file.size, sendState.offset + buf.byteLength);
       sendState.chunkIndex = index + 1;
 
-      // Release worker backpressure using original size so worker accounting stays correct
-      fileWorker.postMessage({ type: "ack-chunk", bytes: rawBuf.byteLength });
+      // ── Pull-one-ahead: request exactly one more chunk per send ───────────
+      // This is the core fix. Previously we batch-pulled (depth - queue.length)
+      // chunks on every successful send, causing the worker to fill chunkQueue
+      // to 93–97 entries before SCTP could report congestion. Now we pull
+      // exactly one chunk per chunk sent — queue stays at 0–1 entries.
+      // SCTP backpressure (bufferedAmount) controls the actual send rate.
+      if (!workerDone) {
+        fileWorker.postMessage({ type: "pull" });
+      }
 
       // Throughput sample for slow-TURN detection
       const now = performance.now();
@@ -1846,9 +2243,6 @@ async function sendFile(file) {
         recordThroughputSample((sendState.offset - _lastSampleB) / ((now - _lastSampleT) / 1000), fileWorker, file, currentDepth);
         _lastSampleT = now; _lastSampleB = sendState.offset;
       }
-
-      // Keep worker disk-read pipeline full
-      if (!workerDone) fileWorker.postMessage({ type: "pull" });
     }
 
     loopRunning = false;
@@ -1864,10 +2258,30 @@ async function sendFile(file) {
     newDc.bufferedAmountLowThreshold = NET.lowWaterMark;
     waitingDrain = false;
     loopRunning  = false;
+    _sendBackoff = 50;   // reset backoff for fresh connection
     // Drain chunkQueue — stale chunks from the dead channel.
     // Fresh chunks will be produced after _onResumeConfirmed seeks the worker.
     chunkQueue.length = 0;
+    // Release finalize lock so a new finalizeSend() can run after reconnect.
+    // The old finalizeSend's polling loop exits when sendState.gotComplete or
+    // sendState.running becomes false — both are safe outcomes.
+    _finalizeLock = false;
     dlog("[SEND] reconnect hook: state reset, waiting for receiver offset confirmation");
+
+    // BUG-FIX-COMPLETE-TIMEOUT: if allSent=true, the entire file was already
+    // sent before the DC died. The receiver may have finalized and sent "complete"
+    // on the old DC (which was dropped). Re-send "done" immediately on the new DC
+    // so the receiver re-finalizes and re-sends "complete" on this live channel.
+    // Without this, the sender waits 30s for a "complete" that was already lost.
+    if (allSent && !sendState.gotComplete) {
+      dlog("[SEND] reconnect after allSent — resending 'done' on new DC");
+      setTimeout(() => {
+        if (!sendState.gotComplete && !sendState.canceled) {
+          try { newDc.send(JSON.stringify({ type: "done", sha256: sendState._sha256 || null })); } catch {}
+          try { newDc.send(JSON.stringify({ type: "status-req" })); } catch {}
+        }
+      }, 300);  // small delay for SCTP to settle after DC open
+    }
   };
 
   // _onResumeConfirmed: called when receiver replies with its confirmed byte count.
@@ -1877,19 +2291,51 @@ async function sendFile(file) {
     dlog("[SEND] resume confirmed at", fmtBytes(safeOffset), "(our offset was", fmtBytes(sendState.offset) + ")");
     sendState.offset     = safeOffset;
     sendState.ackBytes   = Math.min(sendState.ackBytes, safeOffset);
-    sendState.chunkIndex = Math.floor(safeOffset / NET.chunkSize);
-    // Re-seek the worker then prime the pipeline
+
+    // BUG-FIX-COMPLETE-TIMEOUT: if the receiver already has all the bytes
+    // (e.g. a small file sent before the DC dropped), skip the worker seek
+    // entirely and re-send "done" directly. This avoids a redundant full
+    // re-read of the file and immediately triggers finalization on the receiver.
+    if (safeOffset >= file.size) {
+      dlog("[SEND] resume confirmed: receiver already has all bytes — re-sending done");
+      workerDone = true;   // mark so sendLoop triggers finalizeSend
+      allSent    = false;  // allow sendLoop's guard to fire finalizeSend once
+      _finalizeLock = false;
+      // sendLoop with empty queue + workerDone=true will call finalizeSend()
+      sendLoop();
+      return;
+    }
+
+    const resumeChunkSize = sendState.startChunkSize || NET.chunkSize || 262144;
+    sendState.chunkIndex = Math.floor(safeOffset / resumeChunkSize);
+    // ── CRITICAL: reset end-of-file flags before re-seeking ─────────────────
+    // workerDone/allSent are closure-local to sendFile. If the worker had already
+    // finished reading the file before the connection dropped, both are true.
+    // Without resetting them, the first chunk from the re-seeked worker causes
+    // sendLoop to call finalizeSend() immediately (workerDone=true, queue empty),
+    // sending a premature "done" to the receiver after just one chunk.
+    workerDone   = false;
+    allSent      = false;
+    _sendBackoff = 50;
     fileWorker.postMessage({ type: "seek",  offset: safeOffset, chunkIndex: sendState.chunkIndex });
-    for (let i = 0; i < NET.pipelineDepth; i++) fileWorker.postMessage({ type: "pull" });
+    // Pull-one-ahead: seed with a single pull after seek, same as kick-off.
+    fileWorker.postMessage({ type: "pull" });
     // sendLoop will fire naturally once worker delivers the first chunk
   };
 
   // ── Worker messages ───────────────────────────────────────────────────────
   fileWorker.onmessage = e => {
+    // Drop any message from a previous worker (stale queued events after terminate())
+    if (sendState._workerGen !== _workerGen) {
+      dlog("[WORKER] dropped stale message type=" + e.data.type + " gen=" + _workerGen + " current=" + sendState._workerGen);
+      return;
+    }
     if (e.data.type === "chunk") {
       if (sendState.canceled) return;
       chunkQueue.push({ buf: e.data.buf, index: e.data.index });
-      sendLoop();
+      // Only kick sendLoop when not already draining — if waitingDrain is
+      // true, the drain handler will call sendLoop() when ready.
+      if (!waitingDrain) sendLoop();
       return;
     }
     if (e.data.type === "done") {
@@ -1903,20 +2349,33 @@ async function sendFile(file) {
 
   // ── RTT polling ───────────────────────────────────────────────────────────
   startRttPolling(primaryPeer?.pc, newDepth => {
-    const delta = newDepth - currentDepth;
     currentDepth = newDepth;
     applyThreshold();
-    if (delta > 0 && !workerDone) for (let i = 0; i < delta; i++) fileWorker.postMessage({ type: "pull" });
+    // Pull-one-ahead model is self-regulating — no extra pulls needed on depth change.
   });
+
+  // Guards against concurrent finalizeSend() calls.
+  // After a reconnect, _onResumeConfirmed resets allSent=false so sendLoop
+  // can call finalizeSend() a second time while the first is still polling
+  // for "complete". Two concurrent pollers means the 30s timeout from the
+  // first one fires even though "complete" DID arrive on the second one.
+  let _finalizeLock = false;
 
   // ── FINALIZE ──────────────────────────────────────────────────────────────
   async function finalizeSend() {
+    // Only one finalizeSend at a time — drop duplicates from reconnect paths
+    if (_finalizeLock) {
+      dlog("[FINALIZE] already running — skipping duplicate call");
+      return;
+    }
+    _finalizeLock = true;
     stopRttPolling();
-    // Clean up reconnect hooks — no more data to send
-    sendState._onReconnect       = null;
-    sendState._onResumeConfirmed = null;
-    if (sendState.canceled) return;
-    dlog("[SEND] all chunks sent — draining dc buffer");
+    if (sendState.canceled) { _finalizeLock = false; return; }
+    // FIX-A: capture identity of THIS transfer — if sendState.file changes before
+    // an await resumes (e.g. complete handler fires + startNextFile runs), we abort
+    // rather than sending a ghost "done" message into the next file's DataChannel.
+    const thisFile = file;
+    dlog("[FINALIZE] all chunks sent — draining dc buffer. file=" + thisFile.name);
 
     // Wait for the real dc.bufferedAmount to reach 0
     const drainStart = performance.now();
@@ -1932,8 +2391,17 @@ async function sendFile(file) {
     });
     await waitDrain();
 
-    broadcastMsg({ type: "done", sha256: sendState._sha256 || null });
-    broadcastMsg({ type: "status-req" });
+    // FIX-A: abort if this transfer was superseded while we were awaiting the drain
+    if (sendState.file !== thisFile || sendState.canceled) {
+      dlog("[FINALIZE] transfer superseded after drain — aborting ghost send",
+        "thisFile=" + thisFile.name, "sendState.file=" + (sendState.file?.name || "null"),
+        "canceled=" + sendState.canceled);
+      _finalizeLock = false;
+      return;
+    }
+
+    sendMsg({ type: "done", sha256: sendState._sha256 || null });
+    sendMsg({ type: "status-req" });
 
     // Force progress to 100% on sender side — don't wait for last ACK
     // The progress bar shows ackBytes which may lag by up to ACK_EVERY_BYTES (4MB)
@@ -1946,30 +2414,70 @@ async function sendFile(file) {
         if (!sendState.running || sendState.canceled || sendState.gotComplete) {
           clearInterval(doneResendTimer); doneResendTimer = null; return;
         }
-        broadcastMsg({ type: "done" });
-        broadcastMsg({ type: "status-req" });
-      }, 2000);
+        sendMsg({ type: "done", sha256: sendState._sha256 || null });
+        sendMsg({ type: "status-req" });
+      }, 1000);   // resend every 1s — was 2s; faster recovery when "complete" is lost
     }
 
-    // Wait for receiver to confirm "complete" — with a hard 30s timeout
-    // so we never hang forever if the "complete" message is lost
+    // Wait for receiver to confirm "complete".
+    // 20s timeout — covers SCTP congestion drain (up to ~10s for large queues)
+    // plus TURN relay round-trip. The previous 8s caused false timeouts when
+    // SCTP backoff was still clearing a backlogged chunkQueue (97 chunks seen).
     const waitStart = performance.now();
     while (sendState.running && !sendState.canceled && !sendState.gotComplete) {
-      if (performance.now() - waitStart > 30000) {
+      if (performance.now() - waitStart > 20000) {
         dlog("[SEND] complete timeout — assuming receiver got the file");
         sendState.gotComplete = true;
+        if (doneResendTimer) { clearInterval(doneResendTimer); doneResendTimer = null; }
         break;
       }
       await new Promise(r => setTimeout(r, 150));
     }
-    noSleepStop();
-    // enhancements.js: fire summary panel for sender too
+
+    // ── BUG-FIX-RACE: detect if complete handler already ran cleanup ─────────
+    // The while-loop above exits in two ways:
+    //   (A) sendState.running became false  → the "complete" onmessage handler
+    //       already called safeCloseAllPeers() + startNextFile(). File 2's DC
+    //       may already be open. Do NOT call safeCloseAllPeers() again here or
+    //       we will kill File 2's live connection.
+    //   (B) 30-second timeout (gotComplete forced true, sendState.running still
+    //       true) → normal path, we must do cleanup here.
+    // Distinguish by checking sendState.running: the complete handler sets it
+    // to false; the timeout path leaves it true until we clear it below.
+    if (!sendState.running) {
+      // Path A: complete handler already did full cleanup — just fire the summary.
+      dlog("[SEND] finalizeSend: complete handler already ran cleanup — skipping safeCloseAllPeers");
+      sendState._onReconnect       = null;
+      sendState._onResumeConfirmed = null;
+      _finalizeLock = false;
+      try { window.__enh?.onTransferComplete(file.size); } catch {}
+      return;
+    }
+
+    // Path B: timeout — we must do the cleanup ourselves.
+    dlog("[SEND] finalizeSend: timeout path — running cleanup");
+    sendState._onReconnect       = null;
+    sendState._onResumeConfirmed = null;
+    _finalizeLock = false;
+    sendState.running = false; outgoingFile = null;
+    pauseBtn.disabled = true; resumeBtn.disabled = true; cancelBtn.disabled = true;
+    safeCloseAllPeers();   // sets gracefulClosing=true for 800ms
+    sending = false;
     try { window.__enh?.onTransferComplete(file.size); } catch {}
+    // Delay startNextFile until AFTER the gracefulClosing window (800ms) + margin.
+    // Without this delay, file-offer is emitted while the old PC is still tearing
+    // down ICE. The receiver accepts, creates a new PC, but ICE candidates from
+    // the old session interfere → immediate "disconnected → failed" on new PC.
+    setTimeout(() => startNextFile(), 1000);
   }
 
   // ── KICK OFF ──────────────────────────────────────────────────────────────
+  sendState.startChunkSize = NET.chunkSize;
   fileWorker.postMessage({ type: "start", file, chunkSize: NET.chunkSize, offset: 0, chunkIndex: 0 });
-  for (let i = 0; i < currentDepth; i++) fileWorker.postMessage({ type: "pull" });
+  // Pull-one-ahead: seed with a single pull. sendLoop will pull one more per
+  // chunk sent, so chunkQueue never grows beyond 1 entry. This eliminates the
+  // SCTP "send queue is full" error caused by pre-loading 16+ chunks at once.
+  fileWorker.postMessage({ type: "pull" });
 }
 
 // ─── RECEIVER ─────────────────────────────────────────────────────────────────
@@ -1999,6 +2507,7 @@ async function startReceiver(meta) {
 
       if (isGenuineReconnect) {
         dlog("startReceiver: genuine reconnect — resuming at", fmtBytes(incomingFile.receivedBytes));
+        showToast(`🔄 Reconnected — resuming from ${fmtBytes(incomingFile.receivedBytes)}`, "info", 3000);
         try {
           window.dc?.send(JSON.stringify({ type: "ready" }));
         } catch(e) { dlog("ready send failed on reconnect:", e); }
@@ -2013,6 +2522,14 @@ async function startReceiver(meta) {
         incomingFile.writable.abort?.().catch(() => {});
       }
       incomingFile = null;
+      // BUG-FIX-NEXTFILE-3: also abort any stale pendingWritable that was set
+      // for THIS transfer but never consumed (e.g. startReceiver was never
+      // reached, or the file handle belongs to the previous transfer's meta).
+      if (pendingWritable) {
+        try { pendingWritable.abort?.(); } catch {}
+        pendingWritable = null;
+        dlog("startReceiver: discarded stale pendingWritable on stale-state reset");
+      }
       // fall through to fresh-start path
     }
   }
@@ -2020,17 +2537,21 @@ async function startReceiver(meta) {
   // ── FRESH start ────────────────────────────────────────────────────────────
   resetTransferUI();
   cancelBtn.disabled = false;
+  // Clear the post-finalize shield now that a real new transfer is starting.
+  // This re-enables handlePeerFailed() for genuine connection failures during
+  // the new transfer (the delayed reset in finalizeIncomingFile may not have
+  // fired yet if the next meta arrived quickly).
+  transferCompleted = false;
 
-  // If sender sent resumeFrom (late join mid-transfer), start from that offset.
-  // The receiver will only get chunks from that point onward.
-  const startOffset = (meta.resumeFrom && meta.resumeFrom > 0) ? meta.resumeFrom : 0;
+  const canDiskMode = (meta.size > MEMORY_MAX_BYTES) ||
+                      ('showDirectoryPicker' in window && window.isSecureContext && pendingWritable !== null);
 
   incomingFile = {
     meta,
-    receivedBytes: startOffset,
-    lastAckSent: startOffset,
-    lastT: performance.now(), lastB: startOffset, ema: 0,
-    chunks: [],        // fresh empty array — never reuse from a previous transfer
+    receivedBytes: 0,
+    lastAckSent: 0,
+    lastT: performance.now(), lastB: 0, ema: 0,
+    chunks: [],
     writable: null,
     writeChain: Promise.resolve(),
     sawDone: false, finalizing: false,
@@ -2038,42 +2559,49 @@ async function startReceiver(meta) {
     receivedChunkIndices: new Set(),
   };
 
-  setStatus(`Receiving: ${meta.name} (${fmtBytes(meta.size)})${startOffset > 0 ? ` — from ${fmtBytes(startOffset)}` : ''}`);
-  addMsg(`<b>Receiving:</b> ${meta.name} (${fmtBytes(meta.size)})${startOffset > 0 ? ` <span class="muted">(joining mid-transfer from ${fmtBytes(startOffset)})</span>` : ''}`);
-  dlog("startReceiver", meta, "startOffset:", startOffset);
+  setStatus(`Receiving: ${meta.name} (${fmtBytes(meta.size)})`);
+  addMsg(`<b>Receiving:</b> ${meta.name} (${fmtBytes(meta.size)})`);
+  dlog("startReceiver", meta);
   try { const id = meta?.id || `${meta?.name}|${meta?.size}`; upsertRecvItem(id, meta.name, meta.size || 0, "receiving", 0, meta.size || 0); renderRecvQueueUI(); } catch {}
 
-  // Use disk streaming for any file where the user pre-chose a save location
-  // (pendingWritable set in acceptBtn.onclick), OR for files >300MB which
-  // always require disk. Small files without a pendingWritable fall back to
-  // in-memory Blob mode (non-HTTPS / File System Access API not available).
+  // Use disk streaming for large files. pendingWritable is normally set by
+  // acceptBtn / auto-accept BEFORE the DC opens. But _acceptPendingFile now
+  // emits file-answer before disk prep completes — the DC can open and meta
+  // can arrive while showDirectoryPicker is still active. Wait for it first.
   const needDisk = meta.size > MEMORY_MAX_BYTES;
-  if (pendingWritable) {
-    // Consume the pre-chosen writable (covers both small and large files)
-    incomingFile.writable = pendingWritable;
-    pendingWritable = null;
-    addMsg(`<span class="muted">💾 Saving to disk: <b>${meta.name}</b></span>`);
-  } else if (needDisk) {
-    // Large file but no pendingWritable — shouldn't happen in normal flow
-    // (acceptBtn should have set it), but handle gracefully as fallback.
-    const canDisk = "showSaveFilePicker" in window && window.isSecureContext;
-    if (!canDisk) {
-      addMsg(`<span class="muted">⚠️ Large file needs HTTPS for disk saving.</span>`);
-      setStatus("⚠️ Large file needs HTTPS/localhost."); incomingFile = null; return;
-    }
-    try {
-      const handle = await window.showSaveFilePicker({ suggestedName: meta.name });
-      incomingFile.writable = await handle.createWritable();
-      addMsg(`<span class="muted">💾 Saving to disk...</span>`);
-    } catch {
-      addMsg(`<span class="muted">❌ Save dialog canceled.</span>`);
-      setStatus("❌ Save canceled."); incomingFile = null; return;
-    }
-  } else {
-    dlog("startReceiver: memory mode — file will be downloaded after transfer");
+  if (needDisk && _diskPrepPromise) {
+    dlog("startReceiver: waiting for disk prep to complete...");
+    await _diskPrepPromise;
+    dlog("startReceiver: disk prep done, pendingWritable=", !!pendingWritable);
   }
 
-  noSleepStart();
+  if (pendingWritable) {
+    // Happy path: pre-chosen writable from acceptBtn / auto-accept
+    incomingFile.writable = pendingWritable;
+    pendingWritable = null;
+    showToast(`💾 Saving to disk: ${meta.name}`, "info", 3000);
+  } else if (needDisk) {
+    // Recovery path: pendingWritable still null after waiting.
+    // IMPORTANT: do NOT call showDirectoryPicker here — this code runs from
+    // a DataChannel onmessage event, which is NOT a user gesture. The browser
+    // will throw SecurityError: "Must be handling a user gesture to show a
+    // file picker." Instead, fall back to memory mode (Blob + a.click()).
+    // Files > MEMORY_MAX_BYTES that can't fit in memory will warn the user.
+    const canFitInMemory = meta.size <= 500 * 1024 * 1024; // 500MB memory limit
+    if (canFitInMemory) {
+      dlog("startReceiver: no pendingWritable — falling back to memory mode for", meta.name);
+      showToast(`⚠️ No save folder — receiving in memory. File will auto-download.`, "warn", 5000);
+      // incomingFile.writable stays null → finalizeIncomingFile uses Blob + a.click()
+    } else {
+      dlog("startReceiver: file too large for memory and no pendingWritable — aborting");
+      setStatus("❌ Save location needed for large files — tap Accept on next offer.");
+      incomingFile = null;
+      return;
+    }
+  } else {
+    // Small file: memory mode, no message needed
+  }
+
   const primaryDc = window.dc;
   try { primaryDc?.send(JSON.stringify({ type: "ready" })); } catch {}
 }
@@ -2108,19 +2636,66 @@ async function handleIncomingChunk(buf) {
   if (incomingFile.writable) {
     // Disk mode: write at the exact byte position so any seek/resume is safe
     const writePosition = incomingFile.receivedBytes;
-    const writableRef   = incomingFile.writable;
+    const filename      = incomingFile.meta.name;
     const u8 = new Uint8Array(writeBuf.slice(0));  // copy — keeps original buf intact
+    // IMPORTANT: read incomingFile.writable at execution time (inside .then),
+    // not at queue time. This ensures that if the writable is replaced during
+    // datapipe recovery, queued writes use the recovered stream automatically.
     incomingFile.writeChain = incomingFile.writeChain
-      .then(() => writableRef.write({ type: "write", position: writePosition, data: u8 }))
-      .catch(e => dlog("Disk write error at position", writePosition, e));
+      .then(async () => {
+        const w = incomingFile?.writable;
+        if (!w) return;
+        try {
+          await w.write({ type: "write", position: writePosition, data: u8 });
+        } catch(e) {
+          // ── Datapipe recovery ────────────────────────────────────────────
+          // Chrome's FileSystemWritableFileStream can enter InvalidStateError
+          // ("Failed to create datapipe") after ICE restart or page background.
+          // The stream is permanently broken — recover by reopening at position.
+          if (e instanceof DOMException && e.name === "InvalidStateError" && incomingFile) {
+            dlog("Disk write: datapipe broken at", writePosition, "— recovering");
+            try {
+              try { await w.close(); } catch {}
+              const recovered = await _reopenWritableAt(filename, writePosition);
+              if (incomingFile) incomingFile.writable = recovered;
+              await recovered.write({ type: "write", position: writePosition, data: u8 });
+              dlog("Disk write: recovered at", writePosition);
+            } catch(e2) {
+              dlog("Disk write: recovery failed at", writePosition, e2);
+            }
+          } else {
+            dlog("Disk write error at position", writePosition, e);
+          }
+        }
+      });
   } else {
     // Memory mode: store a copy so we own the memory regardless of DC GC
     incomingFile.chunks.push(writeBuf.slice(0));
   }
 
   incomingFile.receivedBytes += writeBuf.byteLength;
+
+  // BUG-FIX-4: record chunk size from first non-final chunk so resume-offset
+  // snap is always accurate even if NET.chunkSize was resized mid-transfer.
+  if (!incomingFile.chunkSize && incomingFile.receivedBytes < incomingFile.meta.size) {
+    incomingFile.chunkSize = writeBuf.byteLength;
+  }
+
   setProgressBytes(incomingFile.receivedBytes, incomingFile.meta.size);
-  try { const id = incomingFile.meta?.id || `${incomingFile.meta?.name}|${incomingFile.meta?.size}`; upsertRecvItem(id, incomingFile.meta.name, incomingFile.meta.size || 0, "receiving", incomingFile.receivedBytes, incomingFile.meta.size || 0); renderRecvQueueUI(); } catch {}
+  // Throttle queue UI updates — rendered at most once per animation frame.
+  // Previously called on every 256KB chunk (~2400x for a 600MB file),
+  // causing thousands of synchronous DOM reflows and cutting into throughput.
+  if (!incomingFile._queueRafId) {
+    incomingFile._queueRafId = requestAnimationFrame(() => {
+      incomingFile._queueRafId = null;
+      if (!incomingFile) return;
+      try {
+        const id = incomingFile.meta?.id || `${incomingFile.meta?.name}|${incomingFile.meta?.size}`;
+        upsertRecvItem(id, incomingFile.meta.name, incomingFile.meta.size || 0, "receiving", incomingFile.receivedBytes, incomingFile.meta.size || 0);
+        renderRecvQueueUI();
+      } catch {}
+    });
+  }
 
   // ACK back to sender
   const primaryDc = window.dc;
@@ -2167,10 +2742,18 @@ async function finalizeIncomingIfReady(sha256 = null) {
   // reconnect guard (Fix 3 now handles that) but this is a belt-and-suspenders
   // fix: poll up to 5 s for the final bytes to arrive via SCTP, then clear
   // stale state so any subsequent transfer always starts completely fresh.
+  // FIX-B: guard against multiple concurrent polls (e.g. doneResendTimer fires
+  // sendMsg({type:"done"}) every 2s — each one calls finalizeIncomingIfReady
+  // while receivedBytes < size, spawning a new poll each time → 22 concurrent polls)
+  if (incomingFile._polling) {
+    dlog("done rx: poll already running — skipping duplicate");
+    return;
+  }
+  incomingFile._polling = true;
   dlog("done rx but bytes incomplete — polling for remaining bytes",
     { received: incomingFile.receivedBytes, total: incomingFile.meta.size });
 
-  const deadline = Date.now() + 5000;
+  const deadline = Date.now() + 10000;  // 10s — was 5s, too short for slow SCTP drain
   const poll = setInterval(() => {
     if (!incomingFile) { clearInterval(poll); return; }
     if (incomingFile.receivedBytes >= incomingFile.meta.size) {
@@ -2179,7 +2762,6 @@ async function finalizeIncomingIfReady(sha256 = null) {
       incomingFile.finalizing = true;
       finalizeIncomingFile().catch(e => {
         dlog("Finalize failed (poll path):", e);
-        cancelTransfer("Finalize failed", false);
       });
     } else if (Date.now() > deadline) {
       clearInterval(poll);
@@ -2190,6 +2772,10 @@ async function finalizeIncomingIfReady(sha256 = null) {
         incomingFile = null;
         setStatus("⚠️ Transfer incomplete — please retry");
         addMsg(`<span class="muted">⚠️ Transfer incomplete. Please retry.</span>`);
+        // Do NOT call cancelTransfer here — it sends a "cancel" socket event
+        // which shows as "receiver canceled transfer" on the sender side, which
+        // is misleading. The sender already moved on; just reset locally.
+        transferCompleted = false;
       }
     }
   }, 100);
@@ -2197,10 +2783,29 @@ async function finalizeIncomingIfReady(sha256 = null) {
 
 async function finalizeIncomingFile() {
   if (!incomingFile) return;
-  const writableRef = incomingFile.writable;
-  const chainRef    = incomingFile.writeChain;
-  const meta        = incomingFile.meta;
-  const expectedSha = incomingFile.expectedSha256 || null;
+  const writableRef  = incomingFile.writable;
+  const chainRef     = incomingFile.writeChain;
+  const meta         = incomingFile.meta;
+  const expectedSha  = incomingFile.expectedSha256 || null;
+  // Capture the exact incomingFile object so the finally block can check
+  // if it was replaced by a new startReceiver() call during our async work.
+  const thisIncoming = incomingFile;
+
+  // ── FIX: set transferCompleted + "Processing" status IMMEDIATELY ─────────
+  // transferCompleted=true must be set BEFORE any await so that:
+  //   (1) DC onclose during the slow disk-flush/SHA window is silently
+  //       suppressed (not treated as "unstable connection").
+  //   (2) The enhancements poll sees a non-"✅"/non-"Receiving" status and
+  //       does NOT fire the premature "Transfer complete! 🎉" toast while
+  //       we're still writing bytes to disk or hashing.
+  // The status is updated to ✅ only after all work is done.
+  transferCompleted = true;
+  setStatus(`⏳ Processing: ${meta.name}`);
+  // Cancel any pending reconnect/ICE-fail timers immediately.
+  if (_primaryPeerSocketId) {
+    _clearReconnectTimer(_primaryPeerSocketId);
+    _clearIceFailTimer(_primaryPeerSocketId);
+  }
 
   // ── SHA-256 helper ───────────────────────────────────────────────────────
   async function verifySha256(data) {
@@ -2244,68 +2849,93 @@ async function finalizeIncomingFile() {
       }
       const url  = URL.createObjectURL(blob);
 
-      // ── SHA-256 integrity check ────────────────────────────────────────────
-      const ok = await verifySha256(blob);
-      if (!ok) {
-        // Hash mismatch — don't save the corrupted file
-        URL.revokeObjectURL(url);
-        incomingFile = null;
-        setStatus("⚠️ Integrity check failed — please retry");
-        return;
-      }
-
-      // ── Auto-download: trigger immediately, no manual "Save" click needed ─
-      // Create a hidden <a> and click it so the browser saves the file straight
-      // to Downloads without any extra user interaction.
+      // ── Auto-download immediately — don't wait for SHA-256 ───────────────
+      // SHA-256 of a 30-37MB file takes 5-15s on mobile. Running it before
+      // auto-download blocked "complete" from being sent, causing the sender's
+      // 20s timeout to fire. Download now; verify in background.
       try {
         const a = document.createElement("a");
-        a.href     = url;
-        a.download = meta.name;
-        a.style.display = "none";
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
+        a.href = url; a.download = meta.name; a.style.display = "none";
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
       } catch(e) { dlog("auto-download click failed:", e); }
 
       setStatus(`✅ Received: ${meta.name}`);
       try { const id = meta?.id || `${meta?.name}|${meta?.size}`; upsertRecvItem(id, meta.name, meta.size||0, "done", meta.size||0, meta.size||0); renderRecvQueueUI(); } catch {}
       addMsg(`<b>File received:</b> ${meta.name}`);
       addToDownloadsManager({ name: meta.name, size: meta.size, type: meta.type, savedToDisk: true, url });
+
+      // SHA-256 in background — does not block "complete" or next file
+      if (expectedSha) {
+        verifySha256(blob).then(ok => {
+          if (!ok) addMsg(`<span class="muted">⚠️ Integrity check failed for ${meta.name} — file may be corrupt.</span>`);
+        }).catch(() => {});
+      }
     }
 
-    transferCompleted = true;
     setProgressBytes(meta.size, meta.size);
     etaText.innerText = "Remaining: 0m 0s";
     cancelBtn.disabled = true;
-    noSleepStop();
-    // enhancements.js: fire summary panel
     try { window.__enh?.onTransferComplete(meta.size); } catch {}
 
-    // ── Send "complete" and wait for DC to flush before closing ──────────────
-    // CRITICAL: do NOT call safeCloseAllPeers() immediately after dc.send().
-    // dc.send() only queues the message in the SCTP buffer — it is NOT delivered
-    // instantly. Closing the DC right away drops the buffered "complete" and the
-    // sender gets stuck in its while(!gotComplete) loop forever.
-    // Fix: send "complete", then wait for dc.bufferedAmount → 0 (up to 3s),
-    // then delay 200ms for the sender to process it, THEN close.
+    // Track receiver session stats
+    if (!_sessionRecvStart) _sessionRecvStart = performance.now();
+    _sessionRecvFiles++;
+    _sessionRecvBytes += meta.size || 0;
+
+    // ── Send "complete" IMMEDIATELY — before SHA-256 or any other async work ─
+    // SHA-256 of a 30-37MB file takes 5-15s on mobile. Previously we sent
+    // "complete" after SHA-256, causing the sender's 20s timeout to fire first,
+    // which called safeCloseAllPeers() → closed the DC → "complete" was either
+    // dropped or arrived on a dead channel → every 2nd file skipped.
+    // Fix: send "complete" right away (file data is all received and written),
+    // wait for SCTP to flush, then do SHA-256 in the background.
     const primaryDc = window.dc;
     if (primaryDc?.readyState === "open") {
       try { primaryDc.send(JSON.stringify({ type: "complete" })); } catch(e) { dlog("complete send failed", e); }
-
-      // Wait for SCTP to flush
+      // Wait for SCTP to flush (up to 1s — "complete" is tiny, drains instantly)
       const flushStart = performance.now();
       while (primaryDc.readyState === "open" && primaryDc.bufferedAmount > 0) {
-        if (performance.now() - flushStart > 3000) break;
-        await new Promise(r => setTimeout(r, 30));
+        if (performance.now() - flushStart > 1000) break;
+        await new Promise(r => setTimeout(r, 20));
       }
-      // Extra settle time so sender's onmessage can fire before DC closes
-      await new Promise(r => setTimeout(r, 300));
+      // Brief settle so sender's onmessage fires before we reset state
+      await new Promise(r => setTimeout(r, 150));
     }
 
-    safeCloseAllPeers();
-    setTimeout(() => { transferCompleted = false; }, 500);
+    // Keep DC alive for next file (or close if DC already gone)
+    if (primaryDc?.readyState === "open") {
+      dlog("[RECV-FINALIZE] keeping DC open for next file");
+      softResetForNextFile();
+    } else {
+      safeCloseAllPeers();
+      // DC already closed — sender is done. Show receiver popup.
+      const _popupFiles2   = _sessionRecvFiles;
+      const _popupBytes2   = _sessionRecvBytes;
+      const _popupElapsed2 = (_sessionRecvStart > 0) ? Math.round((performance.now() - _sessionRecvStart) / 1000) : 0;
+      _sessionRecvFiles = 0; _sessionRecvBytes = 0; _sessionRecvStart = 0;
+      setTimeout(() => showCompletionPopup({
+        title: "All Files Received! 🎉",
+        subtitle: `${_popupFiles2} file${_popupFiles2 !== 1 ? "s" : ""} (${fmtBytes(_popupBytes2)}) saved successfully.`,
+        stats: [
+          { value: _popupFiles2.toString(), label: _popupFiles2 !== 1 ? "Files Received" : "File Received" },
+          { value: `${_popupElapsed2}s`, label: "Time Taken" },
+        ],
+        btnText: "Great!",
+      }), 400);
+    }
+    // Delay transferCompleted reset to outlive ICE failure debounce timers
+    setTimeout(() => {
+      if (!sendState.running && !incomingFile) {
+        transferCompleted = false;
+      }
+    }, 1500);
   } finally {
-    incomingFile = null;
+    // Only null incomingFile if it still refers to the file we started finalizing.
+    // If a new meta arrived during our async work (SHA256, disk flush), startReceiver
+    // already replaced incomingFile with the new transfer — don't null it.
+    if (incomingFile === thisIncoming) {
+      incomingFile = null;
+    }
   }
 }
 

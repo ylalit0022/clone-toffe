@@ -32,6 +32,9 @@ const authRoutes    = require("./routes/authRoutes");
 const accountRoutes = require("./routes/account");
 const { optionalAuth } = require("./middleware/authMiddleware");
 
+// ── [SECURITY] WebRTC signaling protection ────────────────────
+const security = require("./middleware/security");
+
 const app    = express();
 const server = http.createServer(app);
 const io     = new Server(server, {
@@ -62,14 +65,13 @@ nunjucks.configure(path.join(__dirname, "views"), {
 app.set("view engine", "njk");
 
 // ── Static files ──────────────────────────────────────────────
-// NOTE: static MUST come before HTML-serving routes so that
-// /socket.io/socket.io.js, /script.js etc. are served correctly.
-// Express routes are matched in registration order; the GET "/"
-// route below is registered after static — that's fine because
-// express.static only intercepts requests for files that actually
-// exist in the public/ folder. index.html is intentionally
-// absent from public/ so the nunjucks route wins.
+// NOTE: static MUST come before HTML-serving routes AND before
+// the HTTP rate limiter so that JS/CSS/image requests never
+// count against the per-IP request cap. express.static only
+// intercepts requests for files that actually exist in public/.
+// index.html is intentionally absent so the nunjucks "/" wins.
 app.use(express.static(path.join(__dirname, "public")));
+
 
 // ── Body parsers + cookie parser ─────────────────────────────
 app.use(express.json());
@@ -207,17 +209,80 @@ app.use((req, res) => {
 // ── Room state ────────────────────────────────────────────────
 const rooms = new Map();   // roomId → Set of { socketId, deviceName }
 
-// ── Server-side file-offer rate limiter ───────────────────────
-const _offerTimestamps = new Map();  // socketId → number[]
+// ── Room activity tracker ─────────────────────────────────────
+// roomId → timestamp (ms) of last observed activity.
+// Updated on: join, file-offer, webrtc-offer.
+// Read by the idle room reaper every REAPER_INTERVAL_MS.
+const roomActivity = new Map();
 
-function checkOfferRateLimit(socketId) {
-  const now  = Date.now();
-  const prev = (_offerTimestamps.get(socketId) || []).filter(t => now - t < 60_000);
-  if (prev.length >= 5) return false;
-  prev.push(now);
-  _offerTimestamps.set(socketId, prev);
-  return true;
+function touchRoom(roomId) {
+  if (roomId) roomActivity.set(roomId, Date.now());
 }
+
+// ── Idle Room Reaper ─────────────────────────────────────────
+// Prevents ghost rooms from accumulating when:
+//   • Peer A joins but Peer B never arrives
+//   • Both peers close their tabs simultaneously
+//   • A transfer fails and neither peer re-joins within 90s
+//
+// Runs every REAPER_INTERVAL_MS (5 min default).
+// Only evicts a room when ALL of the following are true:
+//   1. The room has had no activity for ROOM_IDLE_MS (10 min default)
+//   2. No live sockets are present (room.size === 0) OR all occupants
+//      are already in the gracePending map (i.e. physically disconnected)
+//
+// This is safe: active peers keep touching the room on every event,
+// so the reaper will never evict a room with live participants.
+//
+// Tuneable via .env:
+//   ROOM_IDLE_MS=600000      (default: 10 minutes)
+//   REAPER_INTERVAL_MS=300000 (default: 5 minutes)
+
+const ROOM_IDLE_MS       = parseInt(process.env.ROOM_IDLE_MS)       || 10 * 60 * 1000;
+const REAPER_INTERVAL_MS = parseInt(process.env.REAPER_INTERVAL_MS) ||  5 * 60 * 1000;
+
+const _reaperTimer = setInterval(() => {
+  const now    = Date.now();
+  let   reaped = 0;
+
+  for (const [roomId, lastActive] of roomActivity) {
+    if (now - lastActive < ROOM_IDLE_MS) continue;  // still fresh
+
+    const room = rooms.get(roomId);
+
+    // Collect grace-period socket IDs for this room
+    const graceSids = new Set(
+      [...gracePending.entries()]
+        .filter(([, v]) => v.roomId === roomId)
+        .map(([sid]) => sid)
+    );
+
+    const liveCount  = room ? room.size : 0;
+    const allInGrace = liveCount > 0 && [...room].every(p => graceSids.has(p.socketId));
+
+    if (liveCount === 0 || allInGrace) {
+      // Cancel any lingering grace timers to prevent double-eviction
+      for (const [sid, v] of gracePending) {
+        if (v.roomId !== roomId) continue;
+        clearTimeout(v.timer);
+        gracePending.delete(sid);
+      }
+      rooms.delete(roomId);
+      roomActivity.delete(roomId);
+      reaped++;
+      console.log(
+        `[Reaper] Evicted idle room "${roomId}" ` +
+        `(inactive ${Math.round((now - lastActive) / 60000)}min, ${liveCount} ghost peer(s) cleared)`
+      );
+    }
+  }
+
+  if (reaped) {
+    console.log(`[Reaper] Sweep complete — ${reaped} room(s) evicted. Active rooms: ${rooms.size}`);
+  }
+}, REAPER_INTERVAL_MS);
+
+if (_reaperTimer.unref) _reaperTimer.unref();  // don't prevent clean process exit
 
 // ── Grace-period map ──────────────────────────────────────────
 const gracePending = new Map(); // socketId → { roomId, deviceName, timer }
@@ -225,13 +290,16 @@ const gracePending = new Map(); // socketId → { roomId, deviceName, timer }
 // ── Socket.IO events ──────────────────────────────────────────
 io.on("connection", (socket) => {
   console.log(`[+] Connected: ${socket.id}`);
+
   let currentRoom = null;
   let deviceName  = "Unknown";
 
   // ── JOIN ROOM ──────────────────────────────────────────────
   socket.on("join-room", ({ roomId, deviceName: name }) => {
-    if (!roomId) return;
     deviceName = name || socket.id.slice(0, 6);
+    // Validate room ID format (no rate limit)
+    if (!security.allowJoin(socket, roomId)) return;
+
 
     // ── Recovered session fast-path ──────────────────────────
     if (socket.recovered) {
@@ -249,7 +317,8 @@ io.on("connection", (socket) => {
       socket.join(roomId);
       currentRoom = roomId;
       const users = rooms.get(roomId)?.size || 1;
-      io.to(roomId).emit("room-status", { room: roomId, users, joined: socket.id, deviceName });
+      // recovered=true tells the client this is a silent reconnect — no "Ready" toast
+      io.to(roomId).emit("room-status", { room: roomId, users, joined: socket.id, deviceName, recovered: true });
       const peers = [...(rooms.get(roomId) || [])]
         .filter(p => p.socketId !== socket.id)
         .map(p => ({ socketId: p.socketId, deviceName: p.deviceName }));
@@ -261,6 +330,36 @@ io.on("connection", (socket) => {
 
     if (currentRoom) {
       leaveRoom(socket, currentRoom);
+    }
+
+    // ── [ONE-TO-ONE] Enforce max 2 peers per room ─────────────
+    // Count confirmed room members PLUS any grace-period slots (peers who
+    // disconnected briefly but haven't been evicted yet). This prevents a
+    // third browser tab from sneaking in during the 90-second grace window.
+    const existingRoom    = rooms.get(roomId);
+    const confirmedPeers  = existingRoom ? existingRoom.size : 0;
+    const gracePeers      = [...gracePending.values()].filter(v => v.roomId === roomId).length;
+    const effectivePeers  = confirmedPeers + gracePeers;
+
+    // Exception: a grace-period reconnect for this exact deviceName is allowed
+    // (it's the same person reconnecting, not a new third party).
+    const isGraceReconnect = [...gracePending.values()].some(
+      v => v.roomId === roomId && v.deviceName === (name || socket.id.slice(0, 6))
+    );
+
+    if (effectivePeers >= 2 && !isGraceReconnect) {
+      console.warn(`[Room ${roomId}] FULL — rejected ${name || socket.id.slice(0,6)} (${effectivePeers} peers present)`);
+      security.secLog("ROOM_FULL", security.getIp(socket), {
+        roomId,
+        deviceName: name || socket.id.slice(0, 6),
+        confirmedPeers,
+        gracePeers,
+      });
+      socket.emit("room-full", {
+        code:    "ROOM_FULL",
+        message: "This room already has two participants. Only one sender and one receiver are allowed.",
+      });
+      return;
     }
 
     gracePending.forEach((v, k) => {
@@ -275,6 +374,7 @@ io.on("connection", (socket) => {
 
     currentRoom = roomId;
     socket.join(roomId);
+    touchRoom(roomId);  // ← [REAPER] mark room as active on join
 
     if (!rooms.has(roomId)) rooms.set(roomId, new Set());
     rooms.get(roomId).add({ socketId: socket.id, deviceName });
@@ -302,12 +402,8 @@ io.on("connection", (socket) => {
   // ── FILE OFFER ────────────────────────────────────────────
   socket.on("file-offer", ({ id, name, size, type }) => {
     if (!currentRoom) return;
+    touchRoom(currentRoom);  // ← [REAPER] file activity = room is live
 
-    if (!checkOfferRateLimit(socket.id)) {
-      console.warn(`[RateLimit] ${deviceName} (${socket.id.slice(0,6)}) exceeded file-offer rate`);
-      socket.emit("file-offer-rejected", { reason: "rate_limit", message: "Too many file offers. Wait a moment." });
-      return;
-    }
 
     const safeName = String(name || "").slice(0, 512) || "file";
     const safeSize = Math.max(0, Number(size) || 0);
@@ -326,6 +422,14 @@ io.on("connection", (socket) => {
     console.log(`[Room ${currentRoom}] ${deviceName} ${accepted ? "✅ accepted" : "❌ rejected"} file from ${to.slice(0,6)}`);
   });
 
+  // Client fires this on beforeunload so peers get instant notification
+  // rather than waiting for the 90s grace-period expiry
+  socket.on("peer-closing", ({ room, name }) => {
+    if (room && room === currentRoom) {
+      socket.to(room).emit("peer-left", { socketId: socket.id, deviceName: name || deviceName });
+    }
+  });
+
   socket.on("file-cancel", (data) => {
     if (currentRoom) socket.to(currentRoom).emit("file-cancel", data);
   });
@@ -333,11 +437,17 @@ io.on("connection", (socket) => {
   socket.on("room-queue", (data) => {
     if (currentRoom) socket.to(currentRoom).emit("room-queue", data);
   });
-
-  // ── WebRTC SIGNALING (relay only — no inspection) ─────────
-  socket.on("webrtc-offer",  ({ to, sdp })       => io.to(to).emit("webrtc-offer",  { from: socket.id, sdp }));
-  socket.on("webrtc-answer", ({ to, sdp })        => io.to(to).emit("webrtc-answer", { from: socket.id, sdp }));
-  socket.on("webrtc-ice",    ({ to, candidate })  => io.to(to).emit("webrtc-ice",    { from: socket.id, candidate }));
+  // ── WebRTC SIGNALING ────────────────────────────────────
+  socket.on("webrtc-offer", ({ to, sdp }) => {
+    touchRoom(currentRoom);  // ← [REAPER] WebRTC negotiation = room is live
+    io.to(to).emit("webrtc-offer", { from: socket.id, sdp });
+  });
+  socket.on("webrtc-answer", ({ to, sdp }) => {
+    io.to(to).emit("webrtc-answer", { from: socket.id, sdp });
+  });
+  socket.on("webrtc-ice", ({ to, candidate }) => {
+    io.to(to).emit("webrtc-ice", { from: socket.id, candidate });
+  });
 
   // ── CHAT ──────────────────────────────────────────────────
   socket.on("chat-msg", ({ text }) => {

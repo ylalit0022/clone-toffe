@@ -19,6 +19,7 @@ export const NET = {
   // Slow-TURN detection state
   _slowSamples:   [],
   slowReduced:    false,
+  _lastProfileKey: "",
 };
 
 export function applyProfile({ pathType, rttMs, availBps } = {}) {
@@ -56,12 +57,16 @@ export function applyProfile({ pathType, rttMs, availBps } = {}) {
   NET.highWaterMark = Math.min(8 * 1024 * 1024, NET.chunkSize * 32);
   NET.lowWaterMark  = NET.chunkSize * 4;
 
-  console.log("[NET] profile", {
-    path:  NET.pathType,
-    chunk: `${(NET.chunkSize  / 1024).toFixed(0)}KB`,
-    depth: NET.pipelineDepth,
-    hwm:   `${(NET.highWaterMark / 1024 / 1024).toFixed(2)}MB`,
-  });
+  const _pk = `${NET.pathType}|${NET.chunkSize}|${NET.pipelineDepth}`;
+  if (NET._lastProfileKey !== _pk) {
+    NET._lastProfileKey = _pk;
+    console.log("[NET] profile", {
+      path:  NET.pathType,
+      chunk: `${(NET.chunkSize  / 1024).toFixed(0)}KB`,
+      depth: NET.pipelineDepth,
+      hwm:   `${(NET.highWaterMark / 1024 / 1024).toFixed(2)}MB`,
+    });
+  }
 }
 
 // Call once after ICE connects, passing pc.getStats() result
@@ -70,6 +75,13 @@ export async function detectAndApply(pc) {
   try {
     const stats = await pc.getStats();
     const { pathType, rttMs, availBps } = (await import("./ice.js")).detectPathType(stats);
+    // Only reset slow-TURN samples when path type actually changes.
+    // On reconnect within the same path, preserve accumulated samples so
+    // slow-TURN detection still fires without needing 3 new samples.
+    if (pathType !== NET.pathType) {
+      NET._slowSamples = [];
+      NET.slowReduced  = false;
+    }
     applyProfile({ pathType, rttMs, availBps });
   } catch(e) { console.warn("[NET] detectAndApply error:", e); }
 }

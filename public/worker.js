@@ -41,41 +41,82 @@
 //   error      { message }
 
 let file        = null;
-let chunkSize   = 262144;   // 256 KB default
+let chunkSize   = 262144;
 let offset      = 0;
 let chunkIndex  = 0;
 let paused      = false;
 let canceled    = false;
-let reading     = false;   // true while a read Promise is in flight
-let pullQueue   = 0;       // pending pull requests not yet started
+let reading     = false;
+let pullQueue   = 0;
+let seekGen     = 0;
+// BUG-FIX-DONE-SPAM: once "done" has been posted, ignore all further "pull"
+// messages until the next "start" or "seek". Without this flag, every pending
+// "pull" in the message queue after EOF triggers _finalizeDone() again —
+// the main thread received 35× "done" in logs, wasting CPU and confusing
+// the "complete" timeout logic.
+let doneSent    = false;
 
 // ── SHA-256 streaming hash ─────────────────────────────────────────────────
-// We keep a copy of each chunk buffer (before zero-copy transfer) and
-// compute the full-file SHA-256 via SubtleCrypto when done fires.
-// Reset on start/seek so a resumed transfer hashes only sent bytes.
-let _hashBufs    = [];
-let _hashEnabled = typeof crypto !== "undefined" && !!crypto.subtle;
+// Uses DigestStream (Chrome 109+) for true zero-copy streaming — no 600MB
+// memory spike at end of transfer. Falls back to chunk accumulation only if
+// DigestStream is unavailable.
+let _digestStream    = null;   // DigestStream | null
+let _digestWriter    = null;   // WritableStreamDefaultWriter | null
+let _hashBufs        = [];     // fallback accumulator
+let _hashEnabled     = typeof crypto !== "undefined" && !!crypto.subtle;
+let _useDigestStream = _hashEnabled && typeof DigestStream !== "undefined";
 
-// Compute SHA-256 over all accumulated hash buffers, then post done.
-// Falls back to posting done immediately if SubtleCrypto is unavailable.
+function _initHash() {
+  _hashBufs = [];
+  _digestStream = null;
+  _digestWriter = null;
+  if (!_hashEnabled) return;
+  if (_useDigestStream) {
+    try {
+      _digestStream = new DigestStream("SHA-256");
+      _digestWriter = _digestStream.getWriter();
+    } catch {
+      _useDigestStream = false;
+    }
+  }
+}
+
+function _feedHash(buf) {
+  if (!_hashEnabled) return;
+  if (_useDigestStream && _digestWriter) {
+    _digestWriter.write(new Uint8Array(buf)).catch(() => {});
+  } else {
+    _hashBufs.push(buf.slice(0));   // keep copy before zero-copy transfer
+  }
+}
+
+// Finalize hash and post done message.
 async function _finalizeDone() {
-  if (!_hashEnabled || _hashBufs.length === 0) {
+  if (!_hashEnabled) {
     self.postMessage({ type: "done" });
     return;
   }
   try {
-    // Concatenate all chunk buffers into one ArrayBuffer
-    const total = _hashBufs.reduce((s, b) => s + b.byteLength, 0);
-    const merged = new Uint8Array(total);
-    let pos = 0;
-    for (const b of _hashBufs) { merged.set(new Uint8Array(b), pos); pos += b.byteLength; }
-    const hashBuf = await crypto.subtle.digest("SHA-256", merged);
-    const hashHex = Array.from(new Uint8Array(hashBuf)).map(b => b.toString(16).padStart(2, "0")).join("");
-    self.postMessage({ type: "done", sha256: hashHex });
+    let hashHex;
+    if (_useDigestStream && _digestWriter) {
+      await _digestWriter.close();
+      const hashBuf = await _digestStream.digest;
+      hashHex = Array.from(new Uint8Array(hashBuf)).map(b => b.toString(16).padStart(2, "0")).join("");
+    } else if (_hashBufs.length > 0) {
+      const total  = _hashBufs.reduce((s, b) => s + b.byteLength, 0);
+      const merged = new Uint8Array(total);
+      let pos = 0;
+      for (const b of _hashBufs) { merged.set(new Uint8Array(b), pos); pos += b.byteLength; }
+      const hashBuf = await crypto.subtle.digest("SHA-256", merged);
+      hashHex = Array.from(new Uint8Array(hashBuf)).map(b => b.toString(16).padStart(2, "0")).join("");
+    }
+    self.postMessage({ type: "done", sha256: hashHex || null });
   } catch {
     self.postMessage({ type: "done" });
   } finally {
     _hashBufs = [];
+    _digestStream = null;
+    _digestWriter = null;
   }
 }
 
@@ -84,7 +125,10 @@ function readNext() {
   if (pullQueue <= 0) return;
   if (offset >= file.size) {
     pullQueue = 0;
-    _finalizeDone();
+    if (!doneSent) {
+      doneSent = true;
+      _finalizeDone();
+    }
     return;
   }
 
@@ -98,6 +142,9 @@ function readNext() {
   const readOffset = offset;
   const readSize   = Math.min(chunkSize, file.size - readOffset);
   const readIndex  = chunkIndex;
+  // BUG-FIX-6: snapshot the seek generation NOW so we can detect if a seek
+  // arrived while this arrayBuffer() was in flight.
+  const readGen    = seekGen;
 
   offset     += readSize;   // advance NOW — before await
   chunkIndex += 1;
@@ -111,10 +158,17 @@ function readNext() {
         readNext();
         return;
       }
+      // BUG-FIX-6: drop stale chunk if a seek/start/cancel changed the generation
+      // while this read was in flight. Posting it would stripe wrong data at the
+      // receiver's current offset.
+      if (readGen !== seekGen) {
+        readNext();
+        return;
+      }
 
       // Transfer buffer ownership (zero-copy postMessage)
-      // Keep a copy for SHA-256 before transferring ownership
-      if (_hashEnabled) _hashBufs.push(buf.slice(0));
+      // Feed chunk into streaming hash (before zero-copy transfer)
+      _feedHash(buf);
 
       self.postMessage(
         { type: "chunk", buf, index: readIndex, offset: readOffset },
@@ -149,7 +203,9 @@ self.onmessage = e => {
       canceled   = false;
       reading    = false;
       pullQueue  = 0;
-      _hashBufs  = [];
+      doneSent   = false;
+      _initHash();
+      seekGen++;
       break;
 
     case "pull":
@@ -159,16 +215,16 @@ self.onmessage = e => {
       break;
 
     case "ack-chunk":
-      // Backpressure token — not needed here since we gate on pullQueue,
-      // but kept for API compatibility with main thread.
       break;
 
     case "seek":
       offset     = msg.offset     ?? offset;
       chunkIndex = msg.chunkIndex ?? chunkIndex;
-      reading    = false;   // abandon any in-flight read — result will be ignored
-      pullQueue  = 0;       // clear stale pulls; caller will re-seed after seek
-      _hashBufs  = [];      // restart hash from this offset
+      reading    = false;
+      pullQueue  = 0;
+      doneSent   = false;
+      _initHash();
+      seekGen++;
       break;
 
     case "resize":
@@ -188,7 +244,9 @@ self.onmessage = e => {
       canceled  = true;
       paused    = false;
       pullQueue = 0;
+      doneSent  = false;
       file      = null;
+      seekGen++;
       break;
   }
 };

@@ -9,7 +9,6 @@
 //  ✅ 3. Adaptive Chunk Badge   — visual tier label (🐢 slow / 🌐 normal / ⚡ fast)
 //  ✅ 4. Backpressure Indicator — shows throttle status when DC buffer is full
 //  ✅ 5. Smart Retry            — stall detection → receiver requests missing chunk
-//  ✅ 6. Keepalive Ping         — DC + socket ping every 10s
 //  ✅ 7. Device Detection Icon  — peer device icon in accept modal
 //  ✅ 8. Transfer Summary       — post-transfer stats panel (size / time / speed)
 //
@@ -180,7 +179,6 @@
   //  3 ── ADAPTIVE CHUNK BADGE
   // ─────────────────────────────────────────────────────────────────────────────
   var _lastTierIdx = -1;
-  var _tierToasted = -1;  // track which tier we already toasted — never repeat
   var CHUNK_TIERS = [
     { max:24*1024,   label:"🐢 Slow",    bg:"rgba(239,68,68,.1)",   col:"#7f1d1d" },
     { max:80*1024,   label:"🐢 16KB",    bg:"rgba(239,68,68,.1)",   col:"#7f1d1d" },
@@ -222,12 +220,10 @@
     badge.style.border     = "1px solid " + t.col + "44";
     badge.textContent      = t.label + " — " + (cs/1024).toFixed(0) + "KB chunks";
 
-    // Only toast ONCE per tier — never repeat the same tier toast
-    if (inTransfer && tierIdx !== _tierToasted) {
-      _tierToasted = tierIdx;
-      if (tierIdx <= 1)      toast("Slow network — using " + (cs/1024).toFixed(0) + "KB chunks", "warn", 5000);
+    if (inTransfer) {
+      if (tierIdx <= 1)      toast("Slow network detected — using " + (cs/1024).toFixed(0) + "KB chunks", "warn", 5000);
       else if (tierIdx === 2) toast("Network adjusted — " + (cs/1024).toFixed(0) + "KB chunks", "info", 4000);
-      else if (tierIdx >= 3)  toast("Fast network detected ⚡", "success", 4000);
+      else if (tierIdx >= 3)  toast("Fast network — " + (cs/1024).toFixed(0) + "KB chunks ⚡", "success", 4000);
     }
   }
 
@@ -285,19 +281,25 @@
       if (inc.receivedBytes >= inc.meta.size) { _stopRetry(); return; }
 
       if (inc.receivedBytes === _lastRxBytes && inc.receivedBytes > 0) {
-        if (_retryCount >= MAX_RETRIES) {
-          toast("Transfer stalled — you may need to reconnect", "error", 8000);
-          _stopRetry(); return;
-        }
         _retryCount++;
         var chunkSize = (global.NET && global.NET.chunkSize) || 262144;
         var idx = Math.floor(inc.receivedBytes / chunkSize);
         var dc = _getDc();
-        if (dc && dc.readyState === "open") {
+
+        if (_retryCount <= 3 && dc && dc.readyState === "open") {
+          // Phase 1 (retries 1-3): request the missing chunk via DataChannel
           try {
             dc.send(JSON.stringify({ type:"retry-chunk", index:idx }));
-            toast("Requesting missing chunk #" + idx, "warn", 3500);
+            toast("Requesting missing chunk #" + idx, "warn", 3000);
           } catch(e) {}
+        } else {
+          // Phase 3 (retry >= 5): trigger a full WebRTC reconnect
+          toast("Transfer stalled — reconnecting...", "error", 8000);
+          _stopRetry();
+          if (typeof global.handlePeerFailed === "function") {
+            global.handlePeerFailed(global._primaryPeerSocketId || "", "stall-detected");
+          }
+          return;
         }
       } else {
         _retryCount = 0;
@@ -309,24 +311,6 @@
     clearInterval(_retryTimer); _retryTimer = null;
   }
 
-  // ─────────────────────────────────────────────────────────────────────────────
-  //  6 ── KEEPALIVE PING
-  // ─────────────────────────────────────────────────────────────────────────────
-  var _kaTimer = null;
-  function _startKeepalive() {
-    _stopKeepalive();
-    _kaTimer = setInterval(function() {
-      var dc = _getDc();
-      if (dc && dc.readyState === "open") {
-        try { dc.send(JSON.stringify({ type:"ping", ts:Date.now() })); } catch(e) {}
-      }
-      var sock = global.socket || global._signalingSocket;
-      try { if (sock) sock.emit("keepalive"); } catch(e) {}
-    }, 10000);
-  }
-  function _stopKeepalive() {
-    clearInterval(_kaTimer); _kaTimer = null;
-  }
 
   // ─────────────────────────────────────────────────────────────────────────────
   //  8 ── TRANSFER SUMMARY
@@ -389,20 +373,20 @@
       _dcWasOpen = true;
       toast("Peer connected successfully ✅", "success", 4000);
       _hideSum();
-      _startKeepalive();
     } else if (!open && _dcWasOpen) {
       _dcWasOpen = false;
       toast("Connection closed", "warn", 5000);
-      _stopKeepalive();
     }
   }, 700);
 
   // ─────────────────────────────────────────────────────────────────────────────
   //  MASTER POLL — Transfer state from DOM (status text + progress)
   // ─────────────────────────────────────────────────────────────────────────────
-  var _lastStatus   = "";
-  var _inTransfer   = false;
-  var _sumDone      = false;
+  var _lastStatus        = "";
+  var _inTransfer        = false;
+  var _sumDone           = false;
+  var _transferStartedAt = 0;   // FIX: track when transfer began to guard against stale progVal
+  var _badgeHideTimer    = null; // FIX: track badge-hide timeout so we can cancel it on new transfer
 
   setInterval(function() {
     var statusEl  = el("fileStatus");
@@ -415,11 +399,30 @@
     if (nowIn && !_inTransfer) {
       _inTransfer = true; _sumDone = false;
       _sumStart = Date.now();
+      _transferStartedAt = Date.now(); // FIX: record start time
+      // BUG-FIX-7: capture file size NOW while incomingFile / sendState.file
+      // are still live. finalizeReceive() sets incomingFile=null in its finally
+      // block BEFORE updating fileStatus to "✅ Received", so by the time isDone
+      // fires below, incomingFile is always null and _sumBytes stays 0.
       _sumBytes = 0;
+      if (global.sendState && global.sendState.file) _sumBytes = global.sendState.file.size || 0;
+      if (!_sumBytes && global.incomingFile && global.incomingFile.meta) _sumBytes = global.incomingFile.meta.size || 0;
       _hideSum();
       _lastTierIdx = -1;
-      _tierToasted = -1;
+      // FIX: cancel any pending badge-hide timer from the previous transfer
+      if (_badgeHideTimer) { clearTimeout(_badgeHideTimer); _badgeHideTimer = null; _lastTierIdx = -1; }
       _startRetry();
+    }
+
+    // ⏳ Processing: finalizeIncomingFile is running (disk flush / SHA-256).
+    // Keep _inTransfer=true (don't stop counters) but also re-capture file size
+    // in case it wasn't set during the Receiving phase.
+    var isProcessing = /⏳/.test(statusTxt);
+    if (isProcessing && _inTransfer) {
+      if (!_sumBytes) {
+        if (global.sendState && global.sendState.file) _sumBytes = global.sendState.file.size || 0;
+        if (!_sumBytes && global.incomingFile && global.incomingFile.meta) _sumBytes = global.incomingFile.meta.size || 0;
+      }
     }
 
     if (_inTransfer) {
@@ -427,8 +430,14 @@
       _pollBp();
     }
 
-    // Transfer complete
-    var isDone = (/✅/.test(statusTxt) || progVal >= 99.9) && _inTransfer;
+    // Transfer complete — only trigger on ✅ status, never on progVal alone.
+    // Previously progVal >= 99.9 fired the toast while finalizeIncomingFile was
+    // still running (disk close + SHA-256 can take several seconds for large
+    // files), causing a premature "Transfer complete!" glitch. Now we wait for
+    // script.js to explicitly set ✅ after all work is done.
+    var isDone = /✅/.test(statusTxt)
+              && _inTransfer
+              && (Date.now() - _transferStartedAt > 500);
     if (isDone && !_sumDone) {
       _sumDone = true; _inTransfer = false;
       var elapsed = Date.now() - _sumStart;
@@ -438,15 +447,19 @@
       if (bytes > 0 && elapsed > 0) _showSum(bytes, elapsed);
       toast("Transfer complete! 🎉", "success", 5000);
       _stopRetry();
-      _stopKeepalive();
-      setTimeout(function(){ var b=el("enh-chunk-badge"); if(b){b.style.display="none";_lastTierIdx=-1;_tierToasted=-1;} }, 3500);
+      // FIX: store the timer handle so a fast-starting next transfer can cancel it
+      if (_badgeHideTimer) clearTimeout(_badgeHideTimer);
+      _badgeHideTimer = setTimeout(function(){
+        var b=el("enh-chunk-badge"); if(b){b.style.display="none";_lastTierIdx=-1;}
+        _badgeHideTimer = null;
+      }, 3500);
     }
 
-    // Cancel / error / incomplete — stop transfer loop
-    if ((/❌|incomplete|retry/i.test(statusTxt)) && _inTransfer) {
-      _inTransfer = false; _sumDone = true;
-      _stopRetry(); _stopKeepalive();
-      var b = el("enh-chunk-badge"); if(b){b.style.display="none";_lastTierIdx=-1;_tierToasted=-1;}
+    // Cancel / error
+    if (/❌/.test(statusTxt) && _inTransfer) {
+      _inTransfer = false;
+      _stopRetry();
+      var b = el("enh-chunk-badge"); if(b){b.style.display="none";_lastTierIdx=-1;}
       var bpEl = el("enh-bp"); if(bpEl) bpEl.style.display="none";
     }
 
@@ -480,7 +493,7 @@
     sock.on("file-cancel", function(data) {
       var by = (data && data.by) ? data.by : "Peer";
       toast("Transfer cancelled by " + by, "warn", 5000);
-      _stopRetry(); _stopKeepalive();
+      _stopRetry();
     });
 
     sock.on("file-answer", function(ev) {
@@ -498,15 +511,28 @@
   // ─────────────────────────────────────────────────────────────────────────────
   //  RETRY-CHUNK SENDER HANDLER (called from script.js onmessage)
   // ─────────────────────────────────────────────────────────────────────────────
+  // BUG-FIX-1: transfer.js stores the retransmit map as a closure-local
+  // _pendingRetransmits and NEVER exposes it on sendState, so the old
+  // global.sendState.pendingRetransmits reference was always undefined in the
+  // modular build. The fix: check both the public sendState property (script.js)
+  // AND the window.__xferRetransmits bridge that transfer.js now populates.
   function handleRetryChunk(chunkIndex, channel) {
-    var retransmits = global.sendState && global.sendState.pendingRetransmits;
+    var retransmits = (global.sendState && global.sendState.pendingRetransmits)
+                   || global.__xferRetransmits   // bridge set by transfer.js
+                   || null;
     if (!retransmits) return;
     var buf = retransmits.get(chunkIndex);
     if (buf) {
       console.log("[ENH-RETRY] retransmitting chunk", chunkIndex);
-      try { channel.send(buf); } catch(e) { console.warn("[ENH-RETRY]", e); }
+      try { channel.send(buf); } catch(e) { console.warn("[ENH-RETRY] send failed:", e); }
     } else {
-      console.warn("[ENH-RETRY] chunk", chunkIndex, "not in buffer (only last 64 kept)");
+      // Chunk not in retransmit ring (too far behind — ring holds last max(depth×4,256)).
+      // A retry-chunk request will never be satisfied; trigger a reconnect instead
+      // so the sender re-seeks to the receiver's confirmed offset.
+      console.warn("[ENH-RETRY] chunk", chunkIndex, "not in retransmit buffer — triggering reconnect");
+      if (typeof global.handlePeerFailed === "function") {
+        global.handlePeerFailed(global._primaryPeerSocketId || "", "retry-chunk-miss");
+      }
     }
   }
 
@@ -516,20 +542,6 @@
   function init() {
     _patchButtons();
     _patchSocket();
-    // Flush any addMsg() calls that fired before enhancements.js loaded
-    if (window.__addMsgQueue && window.__addMsgQueue.length) {
-      window.__addMsgQueue.forEach(function(html) {
-        var tmp = document.createElement("div"); tmp.innerHTML = html;
-        var text = (tmp.innerText || tmp.textContent || "").trim();
-        if (!text) return;
-        var type = /❌|failed|incomplete|canceled|retry|corrupt/i.test(text) ? "error"
-                 : /⚠️|unstable|HTTPS|slow/i.test(text) ? "warn"
-                 : /✅|complete|received|saved|verified/i.test(text) ? "success"
-                 : "info";
-        toast(text, type, 4500);
-      });
-      window.__addMsgQueue = [];
-    }
     console.log("[ENH] enhancements.js loaded — 8 features active");
   }
 
@@ -546,8 +558,6 @@
     showAlert      : showAlert,
     toast          : toast,
     detectDevice   : detectDevice,
-    startKeepalive : _startKeepalive,
-    stopKeepalive  : _stopKeepalive,
     handleRetryChunk: handleRetryChunk,
     onTransferStart: function(fileSize) {
       _sumBytes = fileSize || 0;
@@ -563,11 +573,11 @@
       var ms    = Date.now() - _sumStart;
       if (bytes > 0 && ms > 0) _showSum(bytes, ms);
       toast("Transfer complete! 🎉", "success", 5000);
-      _stopRetry(); _stopKeepalive();
+      _stopRetry();
     },
     onTransferCancelled: function(by) {
       toast(by === "self" ? "Transfer cancelled by you" : "Transfer cancelled by " + (by||"peer"), "warn", 5000);
-      _stopRetry(); _stopKeepalive();
+      _stopRetry();
     },
   };
 

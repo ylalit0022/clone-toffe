@@ -1,19 +1,10 @@
-// ═══════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 //  ice.js  — ICE / TURN server configuration
 //
-//  SECURITY FIX: TURN credentials are NO LONGER hardcoded here.
-//  They are fetched from the server's /api/ice-config endpoint,
-//  which reads them from environment variables at runtime.
-//
-//  This means:
-//    - Credentials are never visible in the client JS bundle
-//    - You can rotate credentials without redeploying the client
-//    - DevTools inspection of source code reveals nothing sensitive
-//
-//  Usage:
-//    await initIceConfig();          // call once on startup (app.js)
-//    const servers = getIceServers(); // call when creating RTCPeerConnection
-// ═══════════════════════════════════════════════
+//  NOTE: export keywords removed — loaded as plain <script>, not ES module.
+//  Functions are globals: initIceConfig(), getIceServers(), buildIceServers(),
+//  detectPathType()
+// ═══════════════════════════════════════════════════════════════
 
 let _iceServers = null;   // cached after first fetch
 
@@ -26,7 +17,7 @@ const STUN_ONLY_FALLBACK = [
 ];
 
 // ── Fetch ice servers from server ────────────────────────────
-export async function initIceConfig() {
+async function initIceConfig() {
   if (_iceServers) return;   // already fetched
 
   try {
@@ -46,7 +37,7 @@ export async function initIceConfig() {
 }
 
 // Returns the cached list (or fallback if initIceConfig was never called)
-export function getIceServers() {
+function getIceServers() {
   if (!_iceServers) {
     console.warn("[ICE] getIceServers() called before initIceConfig() — using STUN-only fallback");
     return STUN_ONLY_FALLBACK;
@@ -55,12 +46,12 @@ export function getIceServers() {
 }
 
 // ── Kept for backward compat — peer.js calls buildIceServers() ───────────
-export function buildIceServers() {
+function buildIceServers() {
   return getIceServers();
 }
 
 // ── Path detection (unchanged) ────────────────────────────────
-export function detectPathType(stats) {
+function detectPathType(stats) {
   let pair = null;
   stats.forEach(r => {
     if (r.type === "transport" && r.selectedCandidatePairId)

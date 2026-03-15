@@ -370,7 +370,12 @@ function showConnectionTypeBadge(pathType, rttMs) {
 }
 
 // ─── MEMORY CONSTANTS ─────────────────────────────────────────────────────────
+<<<<<<< HEAD
 const MEMORY_MAX_BYTES   = 50 * 1024 * 1024;    // use disk streaming above 50 MB
+=======
+const MEMORY_MAX_BYTES   = 4 * 1024 * 1024 * 1024;  // effectively unlimited
+// Disk streaming removed — all received files use memory → Blob → auto-download.
+>>>>>>> a862989 (added zip and unzip)
 const MAX_MEMORY_BUFFER  = 32  * 1024 * 1024;   // never hold >32MB across all queues
 
 // ─── ACK / FLOW CONSTANTS ─────────────────────────────────────────────────────
@@ -444,10 +449,12 @@ function stopDcKeepalive() {
   if (_keepaliveTimer) { clearInterval(_keepaliveTimer); _keepaliveTimer = null; }
 }
 let fileQueue     = [];
+let _zipInProgress = false;  // true while zipAndEnqueue is building the bundle
 let sending       = false;
 let outgoingFile  = null;
 let fileWorker    = null;
 let pendingIncoming = null;
+<<<<<<< HEAD
 let pendingWritable = null;
 
 // ─── SESSION-LEVEL SAVE FOLDER ────────────────────────────────────────────────
@@ -523,6 +530,10 @@ async function _reopenWritableAt(filename, position) {
 
 /** Reset the save folder (e.g. when user leaves the room). */
 function _clearSaveDir() { _saveDir = null; }
+=======
+
+// Disk-streaming helpers removed — all files use memory chunks → Blob → a.click() auto-download.
+>>>>>>> a862989 (added zip and unzip)
 let currentRoom   = "";
 let transferCompleted = false;
 let gracefulClosing   = false;
@@ -554,6 +565,9 @@ let sendState = {
 
 // Receiver state
 let incomingFile = null;
+// FIX-2: holds a meta object that arrived while the previous finalizeIncomingFile()
+// was still running (async SHA-256 / disk flush).  Retried in the finally block.
+let _deferredRecvMeta = null;
 
 // READY handshake state (one per transfer)
 let receiverReady = false;
@@ -695,7 +709,7 @@ function renderRecvQueueUI() {
   if (!fileInput) return; ensureRecvQueueUI();
   if (!recvQueueListEl) return;
   const pending = recvHistory.filter(x => x.state === "pending" || x.state === "receiving");
-  const done    = recvHistory.filter(x => x.state === "done"    || x.state === "canceled");
+  const done    = recvHistory.filter(x => x.state === "done" || x.state === "canceled" || x.state === "failed");
   recvQueueCountEl.innerText = `${pending.length + done.length} file(s)`;
   const items = [];
   pending.forEach(it => {
@@ -710,8 +724,18 @@ function renderRecvQueueUI() {
     </div>`);
   });
   done.forEach(it => {
-    const label = it.state === "done" ? "✅ Received" : "❌ Canceled";
-    items.push(`<div style="padding:8px 10px;border-radius:12px;background:rgba(0,0,0,.06);margin-bottom:8px;"><div style="font-weight:700;color:#555;">${label}: ${it.name} <span style="opacity:.7;font-size:12px;">${fmtBytes(it.size)}</span></div></div>`);
+    let label, bg, color;
+    if (it.state === "done") {
+      label = "✅ Received"; bg = "rgba(0,0,0,.06)"; color = "#555";
+    } else if (it.state === "failed") {
+      // FIX-C: show failed files distinctly in red with byte count so user knows which to resend
+      const pct = it.total ? Math.floor((it.done / it.total) * 100) : 0;
+      label = `⚠️ Incomplete (${pct}% — ${fmtBytes(it.done)} of ${fmtBytes(it.size)}) — ask sender to resend`;
+      bg = "rgba(239,68,68,.08)"; color = "#b91c1c";
+    } else {
+      label = "❌ Canceled"; bg = "rgba(0,0,0,.06)"; color = "#555";
+    }
+    items.push(`<div style="padding:8px 10px;border-radius:12px;background:${bg};margin-bottom:8px;"><div style="font-weight:700;color:${color};">${label}: ${it.name} <span style="opacity:.7;font-size:12px;">${it.state === "failed" ? "" : fmtBytes(it.size)}</span></div></div>`);
   });
   if (!items.length) items.push(`<div style="opacity:.7;padding:6px 8px;">No received files yet</div>`);
   recvQueueListEl.innerHTML = items.join("");
@@ -770,7 +794,45 @@ function resetTransferUI() {
   etaText.innerText = "Remaining: --";
   pauseBtn.disabled = true; resumeBtn.disabled = true; cancelBtn.disabled = true;
 }
-function setStatus(text) { fileStatus.innerText = text; }
+// ── FIX-ALERTS: route status text through TransferAlerts when available ──────
+// TransferAlerts (transfer-alerts.js) must be loaded before script.js in HTML.
+// If it isn't present we fall back to the original innerText behaviour so
+// nothing breaks.
+function setStatus(text) {
+  if (typeof TransferAlerts === "undefined") {
+    fileStatus.innerText = text;
+    return;
+  }
+  // Clear the raw text — the alert card replaces it
+  fileStatus.innerText = "";
+
+  if (text.startsWith("Waiting")) {
+    TransferAlerts.onWaitingForReady(sendState.file?.name);
+  } else if (text.includes("⏳") || text.includes("Processing")) {
+    const name = incomingFile?.meta?.name || sendState.file?.name;
+    const size = incomingFile?.meta?.size || sendState.file?.size;
+    TransferAlerts.onProcessing(name, size);
+  } else if (text.startsWith("✅") || text.startsWith("Receiving:") || text.startsWith("Sending:")) {
+    // Handled by onProgress / onComplete — nothing extra needed here
+  } else if (text.includes("incomplete") || text.startsWith("❌") || text.includes("⚠️")) {
+    const clean = text.replace(/[❌⚠️✅⏳]/g, "").trim();
+    if (text.includes("incomplete") || text.includes("size") || text.includes("corrupt")) {
+      TransferAlerts.onIncompletFile(
+        incomingFile?.receivedBytes || 0,
+        incomingFile?.meta?.size   || 0,
+        incomingFile?.meta?.name   || ""
+      );
+    } else {
+      TransferAlerts.onError(clean);
+    }
+  } else {
+    // Unrecognised state — show as plain text fallback
+    fileStatus.innerText = text;
+  }
+}
+
+// Initialise alerts container as soon as the DOM is ready
+if (typeof TransferAlerts !== "undefined") TransferAlerts.init();
 function setConnectedUI(ok, msg, hint = "") {
   connDot.classList.toggle("green", !!ok);
   statusText.innerText = msg || (ok ? "Connected" : "Not Connected");
@@ -854,26 +916,83 @@ function showToast(message, type = "info", duration = 4000) {
   }
 }
 
+<<<<<<< HEAD
 function showCompletionPopup({ title, subtitle, stats, btnText = "Done" }) {
+=======
+function showCompletionPopup({ title, subtitle, stats, btnText = "Done", fileRows = [] }) {
+>>>>>>> a862989 (added zip and unzip)
   const existing = document.getElementById("completionPopup");
   if (existing) existing.remove();
   const popup = document.createElement("div");
   popup.id = "completionPopup";
+<<<<<<< HEAD
+=======
+
+  // Stats row (existing summary numbers)
+>>>>>>> a862989 (added zip and unzip)
   const statsHtml = stats.map(s => `
     <div class="cp-stat">
       <div class="cp-stat-val">${s.value}</div>
       <div class="cp-stat-lbl">${s.label}</div>
     </div>`).join("");
+<<<<<<< HEAD
+=======
+
+  // FIX-D: per-file rows — show exactly which files succeeded, failed, were skipped
+  let fileListHtml = "";
+  if (fileRows.length > 0) {
+    const rows = fileRows.map(r => {
+      let icon, color;
+      if (r.state === "done")     { icon = "✅"; color = "#15803d"; }
+      else if (r.state === "failed")   { icon = "⚠️"; color = "#b91c1c"; }
+      else if (r.state === "canceled") { icon = "❌"; color = "#6b7280"; }
+      else                             { icon = "⏭"; color = "#6b7280"; }
+      const shortName = r.name.length > 36 ? r.name.slice(0, 34) + "…" : r.name;
+      return `<div class="cp-file-row">
+        <span class="cp-file-icon">${icon}</span>
+        <span class="cp-file-name" style="color:${color}">${shortName}</span>
+        <span class="cp-file-size">${fmtBytes(r.size)}</span>
+      </div>`;
+    }).join("");
+    fileListHtml = `<div class="cp-file-list">${rows}</div>`;
+  }
+
+>>>>>>> a862989 (added zip and unzip)
   popup.innerHTML = `<div class="cp-card">
     <div class="cp-icon">🎉</div>
     <div class="cp-title">${title}</div>
     <div class="cp-subtitle">${subtitle}</div>
     <div class="cp-stats">${statsHtml}</div>
+<<<<<<< HEAD
+=======
+    ${fileListHtml}
+>>>>>>> a862989 (added zip and unzip)
     <button class="cp-btn" onclick="document.getElementById('completionPopup')?.remove()">${btnText}</button>
   </div>`;
   document.body.appendChild(popup);
   popup.addEventListener("click", e => { if (e.target === popup) popup.remove(); });
 }
+<<<<<<< HEAD
+=======
+
+// Inject per-file list styles into the existing popup CSS block
+(function injectSummaryFileListStyles() {
+  const s = document.createElement("style");
+  s.textContent = `
+    #completionPopup .cp-card{max-width:420px;max-height:90vh;overflow-y:auto;}
+    #completionPopup .cp-file-list{text-align:left;border-top:1px solid rgba(0,0,0,.08);
+      margin:0 -4px 16px;padding-top:10px;}
+    #completionPopup .cp-file-row{display:flex;align-items:center;gap:8px;
+      padding:5px 4px;border-radius:8px;}
+    #completionPopup .cp-file-row:hover{background:rgba(0,0,0,.03);}
+    #completionPopup .cp-file-icon{font-size:14px;flex-shrink:0;}
+    #completionPopup .cp-file-name{flex:1;font-size:12px;font-weight:600;
+      white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    #completionPopup .cp-file-size{font-size:11px;color:#999;flex-shrink:0;}
+  `;
+  document.head.appendChild(s);
+})()
+>>>>>>> a862989 (added zip and unzip)
 function addChatBubble({ user, text, mine }) {
   const row = document.createElement("div"); row.className = `msgRow ${mine ? "mine" : "other"}`;
   const bubble = document.createElement("div"); bubble.className = `bubble ${mine ? "mine" : "other"}`;
@@ -1018,7 +1137,10 @@ if (copyLinkBtn) {
 function joinRoom(roomId, mode) {
   // Clear the cached save folder when switching rooms — each room session
   // should pick its own destination folder.
+<<<<<<< HEAD
   if (roomId !== currentRoom) _clearSaveDir();
+=======
+>>>>>>> a862989 (added zip and unzip)
   // Reset auto-accept when switching rooms so the new room always shows
   // the first-file modal (user explicitly consents per room session).
   if (roomId !== currentRoom) {
@@ -1143,7 +1265,13 @@ function enableDragDrop() {
   overlay.addEventListener("drop", onDrop);
 }
 
-fileInput.addEventListener("change", () => { enqueueFilesForSend(fileInput.files); fileInput.value = ""; });
+fileInput.addEventListener("change", () => {
+  // Snapshot into Array before clearing value — FileList is a live object
+  // tied to the input and becomes empty after value="" in many browsers.
+  const fileArr = Array.from(fileInput.files);
+  fileInput.value = "";
+  enqueueFilesForSend(fileArr);
+});
 
 // ── FIX: Auto rejoin room after socket reconnect ──────────────────────────────
 // When Android opens the file picker, Chrome may background the tab and
@@ -1174,6 +1302,7 @@ document.addEventListener("visibilitychange", () => {
 });
 
 function enqueueFilesForSend(files) {
+<<<<<<< HEAD
   Array.from(files || []).forEach(file => {
     const err = validateFile(file);
     if (err) { addMsg(`<span class="muted">❌ ${err}</span>`); return; }
@@ -1182,10 +1311,192 @@ function enqueueFilesForSend(files) {
     upsertSentItem(file._qid, file.name, file.size, "queued", 0, file.size);
     addMsg(`<span class="muted">📤 Selected: ${file.name} (${fmtBytes(file.size)})</span>`);
   });
+=======
+  const arr = Array.from(files || []);
+
+  // ── ZIP BUNDLE: intercept multi-file selection ────────────────────────────
+  // When 2+ files are selected simultaneously, zip them into a single bundle
+  // and transfer as one file. The receiver auto-extracts and downloads each
+  // file individually. Single-file selections bypass this entirely.
+  // fflate availability is checked inside zipAndEnqueue (lazy-loads if needed).
+  if (arr.length >= 2) {
+    zipAndEnqueue(arr);   // async — shows progress, then calls _enqueueOneFile
+    return;
+  }
+  // Single file — original path unchanged
+  arr.forEach(f => _enqueueOneFile(f));
+  _afterEnqueue();
+}
+
+// ── Internal: validate + push one file into the queue ────────────────────────
+function _enqueueOneFile(file) {
+  const err = validateFile(file);
+  if (err) {
+    addMsg(`<span class="muted">❌ ${err}</span>`);
+    if (typeof TransferAlerts !== "undefined" && err.includes("too large")) {
+      TransferAlerts.onFileTooLarge(file.name, file.size, MAX_FILE_SIZE);
+    }
+    return false;
+  }
+  try { file._qid = file._qid || (crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`); } catch { file._qid = `${Date.now()}-${Math.random()}`; }
+  fileQueue.push(file);
+  upsertSentItem(file._qid, file.name, file.size, "queued", 0, file.size);
+  addMsg(`<span class="muted">📤 Selected: ${file.name} (${fmtBytes(file.size)})</span>`);
+  return true;
+}
+
+function _afterEnqueue(validFiles) {
+  if (validFiles && validFiles.length > 0 && typeof TransferAlerts !== "undefined") {
+    window._taTotalFiles = fileQueue.length;
+    window._taFileIndex  = 1;
+    TransferAlerts.onFilesQueued(validFiles);
+  }
+>>>>>>> a862989 (added zip and unzip)
   try { renderQueueUI(sending ? outgoingFile : null); } catch {}
-  // Broadcast the queue to all room members
   try { if (typeof window.multiroomBroadcastQueue === "function") window.multiroomBroadcastQueue(fileQueue.map(f => ({ name: f.name, size: f.size }))); } catch {}
   startNextFile();
+}
+
+// ── ZIP BUNDLE builder ────────────────────────────────────────────────────────
+// Uses fflate.Zip streaming: never buffers the full ZIP in RAM.
+// Each file is read via FileReader in chunks fed into a ZipDeflate entry.
+// Output chunks accumulate in zipChunks[], then assembled into one File.
+async function zipAndEnqueue(files) {
+  _zipInProgress = true;  // block startNextFile until zip is ready
+  // ── Ensure fflate is loaded (lazy-load if CDN script hasn't run yet) ──────
+  if (typeof fflate === "undefined") {
+    await new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = "https://cdn.jsdelivr.net/npm/fflate@0.8.2/umd/index.js";
+      s.onload  = resolve;
+      s.onerror = reject;
+      document.head.appendChild(s);
+    }).catch(() => null);
+    if (typeof fflate === "undefined") {
+      // Still not available — fall back to sequential send
+      addMsg('<span class="muted">⚠️ Zip library unavailable — sending files individually.</span>');
+      _zipInProgress = false;
+      files.forEach(f => _enqueueOneFile(f));
+      _afterEnqueue(Array.from(files));
+      return;
+    }
+  }
+  // Validate all first
+  const valid = [];
+  for (const f of files) {
+    const err = validateFile(f);
+    if (err) {
+      addMsg(`<span class="muted">❌ ${f.name}: ${err}</span>`);
+      continue;
+    }
+    valid.push(f);
+  }
+  if (valid.length === 0) return;
+  if (valid.length === 1) {
+    // Only one valid file after filtering — skip zip
+    _zipInProgress = false;
+    _enqueueOneFile(valid[0]);
+    _afterEnqueue([valid[0]]);
+    return;
+  }
+
+  const totalSize = valid.reduce((s, f) => s + f.size, 0);
+  const bundleName = `tranzo-bundle-${valid.length}files.zip`;
+
+  // Show zipping status
+  setStatus(`🗜️ Compressing ${valid.length} files…`);
+  addMsg(`<span class="muted">🗜️ Zipping ${valid.length} files (${fmtBytes(totalSize)}) into bundle…</span>`);
+
+  // Show each file as "zipping" in the queue while we build
+  const zipQueueRows = valid.map(f => ({ name: f.name, state: "zipping", done: 0, total: f.size }));
+  try { if (typeof window.renderQueueUI === "function") {
+    // Temporarily inject rows so transfer-ui shows them
+    window._zipPreviewRows = zipQueueRows;
+    if (typeof renderFileList === "function") renderFileList(zipQueueRows);
+  }} catch {}
+
+  try {
+    const zipChunks = [];
+    let zippedBytes = 0;
+
+    await new Promise((resolve, reject) => {
+      const zip = new fflate.Zip((err, chunk, final) => {
+        if (err) { reject(err); return; }
+        zipChunks.push(chunk);
+        if (final) resolve();
+      });
+
+      (async () => {
+        for (let i = 0; i < valid.length; i++) {
+          const file = valid[i];
+          await new Promise((res, rej) => {
+            const deflate = new fflate.ZipDeflate(file.name, { level: 0 }); // level 0 = store, fastest
+            zip.add(deflate);
+
+            const CHUNK = 2 * 1024 * 1024; // 2MB read chunks
+            let offset = 0;
+
+            function readNext() {
+              const slice = file.slice(offset, offset + CHUNK);
+              const reader = new FileReader();
+              reader.onload = e => {
+                const buf = new Uint8Array(e.target.result);
+                offset += buf.byteLength;
+                zippedBytes += buf.byteLength;
+                // Update progress
+                const pct = Math.round((zippedBytes / totalSize) * 100);
+                setStatus(`🗜️ Compressing ${valid.length} files… ${pct}%`);
+                const isFinal = offset >= file.size;
+                deflate.push(buf, isFinal);
+                if (!isFinal) readNext();
+                else res();
+              };
+              reader.onerror = rej;
+              reader.readAsArrayBuffer(slice);
+            }
+            readNext();
+          });
+        }
+        zip.end();
+      })().catch(reject);
+    });
+
+    // Assemble ZIP blob
+    const totalZipSize = zipChunks.reduce((s, c) => s + c.byteLength, 0);
+    const zipBlob = new Blob(zipChunks, { type: "application/zip" });
+    const zipFile  = new File([zipBlob], bundleName, { type: "application/zip" });
+
+    // Attach bundle metadata on the File object
+    zipFile._zipBundle  = true;
+    zipFile._zipFiles   = valid.map(f => ({ name: f.name, size: f.size, type: f.type || "application/octet-stream" }));
+    try { zipFile._qid = crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`; } catch { zipFile._qid = `${Date.now()}-${Math.random()}`; }
+
+    addMsg(`<span class="muted">✅ Bundle ready: ${bundleName} (${fmtBytes(zipFile.size)}) — starting transfer…</span>`);
+    _zipInProgress = false;
+    window._zipPreviewRows = null;
+
+    // Enqueue the single zip file
+    fileQueue.push(zipFile);
+    upsertSentItem(zipFile._qid, zipFile.name, zipFile.size, "queued", 0, zipFile.size);
+
+    if (typeof TransferAlerts !== "undefined") {
+      window._taTotalFiles = fileQueue.length;
+      window._taFileIndex  = 1;
+      TransferAlerts.onFilesQueued([zipFile]);
+    }
+    try { renderQueueUI(sending ? outgoingFile : null); } catch {}
+    try { if (typeof window.multiroomBroadcastQueue === "function") window.multiroomBroadcastQueue(fileQueue.map(f => ({ name: f.name, size: f.size }))); } catch {}
+    startNextFile();
+
+  } catch (err) {
+    console.error("[ZIP] Failed to build bundle:", err);
+    addMsg(`<span class="muted">⚠️ Zip failed — sending files individually instead.</span>`);
+    _zipInProgress = false;
+    window._zipPreviewRows = null;
+    // Fallback: enqueue individually
+    valid.forEach(f => _enqueueOneFile(f));
+    _afterEnqueue(valid);
+  }
 }
 
 // ─── BUTTONS ──────────────────────────────────────────────────────────────────
@@ -1195,6 +1506,10 @@ pauseBtn.onclick = () => {
   pauseBtn.disabled = true; resumeBtn.disabled = false;
   setStatus("⏸ Paused");
   try { fileWorker?.postMessage({ type: "pause" }); } catch {}
+  // FIX-ALERTS: show pause card
+  if (typeof TransferAlerts !== "undefined") {
+    TransferAlerts.onPaused(sendState.offset, sendState.file?.size || 0);
+  }
 };
 resumeBtn.onclick = () => {
   if (!sendState.running) return;
@@ -1413,6 +1728,18 @@ function handlePeerFailed(socketId) {
 
   showToast(`Connection lost — reconnecting... (attempt ${attempts})`, "warn", 4000);
 
+<<<<<<< HEAD
+=======
+  // FIX-ALERTS: show reconnecting card
+  if (typeof TransferAlerts !== "undefined") {
+    TransferAlerts.onReconnecting(
+      attempts, 5,
+      sendState.offset || 0,
+      sendState.file?.size || 0
+    );
+  }
+
+>>>>>>> a862989 (added zip and unzip)
   const timer = setTimeout(async () => {
     _reconnectTimers.delete(socketId);
     try {
@@ -1465,11 +1792,41 @@ function setupDataChannelFor(socketId, channel, gen) {
       sendState.knownPeers.add(socketId);
       sendFile(outgoingFile).catch(console.error);
     } else {
+<<<<<<< HEAD
       // ── No-op path — log why we skipped both branches ──────────────────────
+=======
+      // ── NO-OP path ───────────────────────────────────────────────────────────
+>>>>>>> a862989 (added zip and unzip)
       dlog("[ONOPEN] NO-OP — sendState.running=" + sendState.running +
         " canceled=" + sendState.canceled +
         " outgoingFile=" + (outgoingFile?.name || "null") +
         " sending=" + sending, socketId);
+<<<<<<< HEAD
+=======
+
+      // ── BUG-FIX-NOOP-QUEUE: DC reconnected but state was already cleared ──
+      // This happens when:
+      //   (a) DC dropped mid fast-path (sendFile had already started/finished
+      //       for the current file, so sendState.running=false, outgoingFile=null)
+      //   (b) handlePeerFailed correctly reconnected but onopen has no file to
+      //       resume or start because the state window passed.
+      // Recovery: if the queue still has files waiting, restart it now that DC
+      // is healthy. Guard: only do this when truly idle (not canceled, not
+      // already sending) to avoid double-starting.
+      if (!sendState.canceled && !sending && fileQueue.length > 0) {
+        dlog("[ONOPEN] NO-OP but queue non-empty — restarting queue", socketId);
+        showToast("🔄 Reconnected — resuming queue", "info", 3000);
+        setTimeout(() => startNextFile(), 100);
+      } else if (!sendState.canceled && sending && !outgoingFile) {
+        // ── sending=true but outgoingFile was cleared — stuck flag ───────────
+        // softResetForNextFile set sending=false, startNextFile set sending=true,
+        // then something cleared outgoingFile without clearing sending.
+        // Reset sending so the queue can unblock on next attempt.
+        dlog("[ONOPEN] NO-OP: sending=true but outgoingFile=null — resetting sending flag");
+        sending = false;
+        setTimeout(() => startNextFile(), 100);
+      }
+>>>>>>> a862989 (added zip and unzip)
     }
   };
 
@@ -1501,6 +1858,12 @@ function setupDataChannelFor(socketId, channel, gen) {
         const _popupFiles   = _sessionRecvFiles;
         const _popupBytes   = _sessionRecvBytes;
         const _popupElapsed = (_sessionRecvStart > 0) ? Math.round((performance.now() - _sessionRecvStart) / 1000) : 0;
+<<<<<<< HEAD
+=======
+        // FIX-D: per-file rows — include failed files so user sees the full picture
+        const _popupRows = recvHistory.slice(-Math.max(_popupFiles, recvHistory.filter(r=>r.state==="failed").length))
+          .map(r => ({ name: r.name, size: r.size, state: r.state }));
+>>>>>>> a862989 (added zip and unzip)
         _sessionRecvFiles = 0; _sessionRecvBytes = 0; _sessionRecvStart = 0;
         setTimeout(() => showCompletionPopup({
           title: "All Files Received! 🎉",
@@ -1509,6 +1872,10 @@ function setupDataChannelFor(socketId, channel, gen) {
             { value: _popupFiles.toString(), label: _popupFiles !== 1 ? "Files Received" : "File Received" },
             { value: `${_popupElapsed}s`, label: "Time Taken" },
           ],
+<<<<<<< HEAD
+=======
+          fileRows: _popupRows,
+>>>>>>> a862989 (added zip and unzip)
           btnText: "Great!",
         }), 300);
       }
@@ -1516,8 +1883,41 @@ function setupDataChannelFor(socketId, channel, gen) {
     }
 
     addMsg(`<span class="muted">⚠️ DataChannel closed (${socketId.slice(0,6)})</span>`);
+<<<<<<< HEAD
     // Only trigger reconnect if we're mid-transfer and not already handling it
     if (sendState.running && !sendState.canceled && !retryInProgress) {
+=======
+
+    // ── BUG-FIX-RECV-UI: mark in-progress receive items as "reconnecting" ──
+    // When DC drops mid-receive, incomingFile stays alive (for resume), but the
+    // queue UI keeps showing "Receiving" with a frozen progress bar forever.
+    // Mark it as a transient "reconnecting" state so the user gets feedback,
+    // then restore to "receiving" when the DC reopens and chunks flow again.
+    if (incomingFile && !incomingFile.finalizing) {
+      try {
+        const id = incomingFile.meta?.id || `${incomingFile.meta?.name}|${incomingFile.meta?.size}`;
+        upsertRecvItem(id, incomingFile.meta.name, incomingFile.meta.size || 0,
+          "reconnecting", incomingFile.receivedBytes || 0, incomingFile.meta.size || 0);
+        renderRecvQueueUI();
+      } catch {}
+    }
+
+    // ── FIX-E: reconnect when EITHER sender or receiver is mid-transfer ────────
+    // Old code only reconnected when sendState.running (sender side). On the
+    // receiver side, DC close mid-receive left incomingFile hanging — no chunks
+    // ever arrived again, poll timeout fired, file lost silently.
+    // BUG-FIX-QUEUE-RECONNECT: also reconnect when outgoingFile is set (DC
+    // dropped between queue items — sendState.running is false during the
+    // offer/ICE phase but outgoingFile is non-null). Without this, the queue
+    // stalls silently at the dropped item and never advances.
+    const shouldReconnect = (!sendState.canceled && !retryInProgress) && (
+      (sendState.running)                          ||
+      (!!outgoingFile && sending)                  ||
+      (!!incomingFile && !incomingFile.finalizing) ||
+      (!!pendingIncoming)
+    );
+    if (shouldReconnect) {
+>>>>>>> a862989 (added zip and unzip)
       handlePeerFailed(socketId);
     }
   };
@@ -1574,15 +1974,46 @@ function setupDataChannelFor(socketId, channel, gen) {
         _sessionSentFiles++;
         _sessionSentBytes += sendState.file?.size || 0;
 
+<<<<<<< HEAD
         if (fileQueue.length > 0) {
           softResetForNextFile();
         } else {
+=======
+        // FIX-ALERTS: increment file index counter for next file
+        window._taFileIndex = (window._taFileIndex || 1) + 1;
+
+        if (fileQueue.length > 0) {
+          // FIX-ALERTS: show "between files" alert while DC resets for next file
+          if (typeof TransferAlerts !== "undefined") {
+            const nextFile  = fileQueue[0];
+            const doneCount = (window._taTotalFiles || 1) - fileQueue.length;
+            TransferAlerts.onBetweenFiles(nextFile.name, doneCount, window._taTotalFiles || 1);
+          }
+          softResetForNextFile();
+        } else {
+          // FIX-ALERTS: all done — show completion card
+          if (typeof TransferAlerts !== "undefined") {
+            TransferAlerts.onComplete({
+              fileName:      sendState.file?.name || "",
+              fileSizeBytes: sendState.file?.size || 0,
+              isSender:      true,
+              allDone:       true,
+              totalFiles:    window._taTotalFiles || _sessionSentFiles,
+            });
+            window._taTotalFiles = 0; window._taFileIndex = 1;
+          }
+>>>>>>> a862989 (added zip and unzip)
           safeCloseAllPeers();
           // Capture values NOW before resetting — setTimeout reads vars by reference,
           // not by value, so resetting before the callback fires gave "0 files".
           const _popupFiles = _sessionSentFiles;
           const _popupBytes = _sessionSentBytes;
           const _popupElapsed = (_sessionSentStart > 0) ? Math.round((performance.now() - _sessionSentStart) / 1000) : 0;
+<<<<<<< HEAD
+=======
+          // FIX-D: capture per-file rows from sentHistory for this session
+          const _popupRows = sentHistory.slice(-_popupFiles).map(r => ({ name: r.name, size: r.size, state: r.state }));
+>>>>>>> a862989 (added zip and unzip)
           _sessionSentFiles = 0; _sessionSentBytes = 0; _sessionSentStart = 0;
           setTimeout(() => showCompletionPopup({
             title: "All Files Sent! 🎉",
@@ -1591,11 +2022,33 @@ function setupDataChannelFor(socketId, channel, gen) {
               { value: _popupFiles.toString(), label: _popupFiles !== 1 ? "Files Sent" : "File Sent" },
               { value: `${_popupElapsed}s`, label: "Time Taken" },
             ],
+<<<<<<< HEAD
+=======
+            fileRows: _popupRows,
+>>>>>>> a862989 (added zip and unzip)
             btnText: "Done",
           }), 400);
         }
         sending = false;
+<<<<<<< HEAD
         setTimeout(() => startNextFile(), 200);
+=======
+        // ── FIX-DOUBLE-START: call startNextFile() directly here, NOT via setTimeout.
+        // The old setTimeout(startNextFile, 200) raced with finalizeSend Path A's
+        // own return path and with the resetReceiverReady() call inside startNextFile:
+        //
+        //   complete handler:  softResetForNextFile() → sending=false → setTimeout(startNextFile,200)
+        //   finalizeSend PathA: returns immediately (does NOT call startNextFile)
+        //   200ms later: startNextFile() → resetReceiverReady() → sendFile() → sendMsg("meta")
+        //                receiver replies "ready" → receiverReady=true
+        //   If ANY other code path calls resetReceiverReady() between the "ready"
+        //   arriving and waitReceiverReady() being called, the flag is cleared and
+        //   waitReceiverReady hangs for 120s → file skipped.
+        //
+        // Fix: call startNextFile() synchronously here. DC is already open (soft-reset
+        // kept it alive), so startNextFile takes the fast path immediately.
+        startNextFile();
+>>>>>>> a862989 (added zip and unzip)
         return;
       }
       if (msg.type === "done")   { await finalizeIncomingIfReady(msg.sha256 || null); return; }
@@ -1630,7 +2083,7 @@ function setupDataChannelFor(socketId, channel, gen) {
 
           if (aligned < incomingFile.receivedBytes) {
             // Drop the partial last chunk from memory-mode chunks array
-            if (!incomingFile.writable && incomingFile.chunks.length > 0) {
+            if (incomingFile.chunks.length > 0) {
               // Remove chunks beyond the aligned offset
               let total = 0;
               const keep = [];
@@ -1652,6 +2105,22 @@ function setupDataChannelFor(socketId, channel, gen) {
           try {
             channel.send(JSON.stringify({ type: "resume-offset", offset: myOffset }));
           } catch(e) { dlog("resume-offset reply failed:", e); }
+          return;
+        }
+
+        // ── FIX-B: reply offset=0 even when incomingFile is null ─────────────
+        // If DC dropped before the first chunk arrived (receivedBytes=0) or after
+        // finalizeIncomingFile already nulled incomingFile, we have no state to
+        // reply from. Previously: fell through silently → sender's
+        // _onResumeConfirmed never fired → sender waited forever → file skipped.
+        // Fix: always reply. offset=0 tells sender to re-send from the beginning,
+        // which is correct — receiver has nothing yet.
+        // Guard: only reply if we are NOT the sender (sendState.running).
+        // If sendState.running is true and incomingFile is null, we ARE the sender
+        // and the message is a receiver-confirms reply — handle below as normal.
+        if (!sendState.running) {
+          dlog("resume-offset: no incomingFile — replying offset=0 so sender re-seeks");
+          try { channel.send(JSON.stringify({ type: "resume-offset", offset: 0 })); } catch {}
           return;
         }
 
@@ -1807,7 +2276,6 @@ function cancelTransfer(reason, notifyPeer, canceledBy) {
     sendState._onReconnect = null;
     sendState._onResumeConfirmed = null;
     try { fileWorker?.postMessage({ type: "cancel" }); } catch {}
-    // Terminate the worker entirely — prevents ghost onmessage callbacks on next transfer
     try { fileWorker?.terminate(); } catch {}
     fileWorker = null;
     sendMsg({ type: "cancel", by: canceledBy || getDeviceName() });
@@ -1818,6 +2286,9 @@ function cancelTransfer(reason, notifyPeer, canceledBy) {
   resetTransferUI(); safeCloseAllPeers();
   addMsg(`<span class="muted">❌ ${reason}</span>`);
   try { const f = sendState?.file || outgoingFile; if (f) { upsertSentItem(f._qid || `${f.name}|${f.size}`, f.name, f.size, "canceled", sendState?.ackBytes || 0, f.size); renderQueueUI(null); } } catch {}
+  // FIX-ALERTS: show cancel card
+  const byPeer = reason && !reason.toLowerCase().includes("you canceled");
+  if (typeof TransferAlerts !== "undefined") TransferAlerts.onCanceled(byPeer);
 }
 socket.on("file-cancel", data => { if (!transferCompleted) cancelTransfer(`${data?.by || "Peer"} canceled`, false); });
 
@@ -1858,11 +2329,25 @@ function updateSenderUIByAck() {
     const remaining = file.size - sendState.ackBytes;
     etaText.innerText = `Remaining: ${formatETA(sendState.ackEma > 0 ? remaining / sendState.ackEma : NaN)}`;
     sendState.lastAckTickT = now; sendState.lastAckTickB = sendState.ackBytes;
+    // FIX-ALERTS: keep alert card live during active send
+    if (typeof TransferAlerts !== "undefined") {
+      TransferAlerts.onProgress({
+        done:       sendState.ackBytes,
+        total:      file.size,
+        speedMbps:  sendState.ackEma / 1024 / 1024,
+        etaSec:     sendState.ackEma > 0 ? remaining / sendState.ackEma : NaN,
+        isSender:   true,
+        fileName:   file.name,
+        fileIndex:  window._taFileIndex  || 1,
+        totalFiles: window._taTotalFiles || 1,
+      });
+    }
   }
 }
 
 // ─── FILE QUEUE ───────────────────────────────────────────────────────────────
 function startNextFile() {
+  if (_zipInProgress) { dlog("[QUEUE] startNextFile deferred — zip in progress"); return; }
   if (sending || fileQueue.length === 0) return;
   const file = fileQueue.shift();
   dlog("[QUEUE] startNextFile — starting:", file.name, "queue remaining:", fileQueue.length,
@@ -1921,7 +2406,15 @@ function startNextFile() {
 
   // Cancel watchdog as soon as DC opens (normal path)
   const _cancelWatchdog = () => clearTimeout(_watchdogTimer);
+<<<<<<< HEAD
   const _origOnDcOpen = Peer?.PeerEvents?.onDcOpen;  // in case peer.js is used
+=======
+  // BUG-FIX-PEER-UNDEF: Peer?.X?.Y throws ReferenceError when Peer is an
+  // undeclared identifier — optional chaining only guards null/undefined, not
+  // variables that were never declared. Use typeof guard instead. This line
+  // was a dead stub left over from a removed peer.js integration.
+  const _origOnDcOpen = (typeof Peer !== "undefined") ? Peer?.PeerEvents?.onDcOpen : undefined;
+>>>>>>> a862989 (added zip and unzip)
   // Use a one-shot listener on the peerConnections map via onopen inside setupDataChannelFor
   // The watchdog self-cancels when sendState.running becomes true
   const _watchdogPoll = setInterval(() => {
@@ -1944,8 +2437,11 @@ socket.on("file-offer", async ({ from, fromName, fromShort, meta }) => {
   // ── Auto-accept logic ─────────────────────────────────────────────────────
   // After the user clicks Accept once per session (_sessionAutoAccept = true),
   // all subsequent file offers are accepted automatically without any modal.
+<<<<<<< HEAD
   // For large files (>MEMORY_MAX_BYTES), _getSaveDir() has already been called
   // and the folder handle is cached — no second picker needed.
+=======
+>>>>>>> a862989 (added zip and unzip)
   // The very first offer (or if session auto-accept was never triggered) always
   // shows the modal so the user explicitly consents.
   //
@@ -1968,6 +2464,11 @@ socket.on("file-offer", async ({ from, fromName, fromShort, meta }) => {
   modalInfo.innerText = `From: ${who}\nFile: ${meta.name}\nSize: ${fmtBytes(meta.size)}\nType: ${meta.type}`;
   modalBg.style.display = "flex";
   window.__mrShouldShowModal = undefined;
+
+  // ── Notify sender that receiver has seen the offer and is reviewing ────────
+  // This lets the sender show a "Receiver is reviewing…" state instead of
+  // just "Waiting for receiver…" with no feedback at all.
+  try { socket.emit("file-offer-seen", { to: from }); } catch {}
 });
 
 rejectBtn.onclick = () => {
@@ -1980,6 +2481,7 @@ rejectBtn.onclick = () => {
 // ── Session-level auto-accept flag ───────────────────────────────────────────
 // Set to true when user clicks Accept for the first time in a session.
 // All subsequent file offers are auto-accepted without showing the modal.
+<<<<<<< HEAD
 // The user only needs to pick a save folder once (for large files) — _getSaveDir()
 // caches the handle for the entire session.
 let _sessionAutoAccept = false;
@@ -1992,6 +2494,10 @@ let _sessionAutoAccept = false;
 // paths call showDirectoryPicker concurrently → NotAllowedError: File picker
 // already active → pendingWritable stays null → "Save location missing".
 let _diskPrepPromise = null;   // Promise<void> | null
+=======
+let _sessionAutoAccept = false;
+
+>>>>>>> a862989 (added zip and unzip)
 
 // Shared helper: accept a pending file offer (used by acceptBtn and auto-accept).
 async function _acceptPendingFile() {
@@ -2000,16 +2506,20 @@ async function _acceptPendingFile() {
   const { from, meta } = pendingIncoming;
 
   // ── Accept immediately — start P2P handshake right away ──────────────────
+<<<<<<< HEAD
   if (pendingWritable) {
     try { pendingWritable.abort?.(); } catch {}
     pendingWritable = null;
   }
+=======
+>>>>>>> a862989 (added zip and unzip)
   pendingIncoming = null;
   modalBg.style.display = "none";
   _primaryPeerSocketId = from;
   socket.emit("file-answer", { to: from, accepted: true });
   setStatus("Accepted. Connecting P2P...");
 
+<<<<<<< HEAD
   // ── Prepare disk storage in parallel with ICE negotiation ────────────────
   // Signal startReceiver to wait for this before trying its own picker.
   const canDisk = "showDirectoryPicker" in window && window.isSecureContext;
@@ -2030,6 +2540,9 @@ async function _acceptPendingFile() {
     addMsg(`<span class="muted">⚠️ Large file needs HTTPS + a modern browser for disk saving.</span>`);
   }
   // Small files: pendingWritable stays null → finalize uses Blob + a.click()
+=======
+  // All files use memory → Blob → a.click() — no disk picker needed.
+>>>>>>> a862989 (added zip and unzip)
 }
 
 acceptBtn.onclick = async () => {
@@ -2039,6 +2552,32 @@ acceptBtn.onclick = async () => {
   addMsg(`<span class="muted">📥 Accepted. Auto-accept enabled for this session — all further files will be received automatically.</span>`);
   await _acceptPendingFile();
 };
+
+
+// ── Sender: receiver has seen the file offer and is reviewing it ──────────────
+// Emitted by the receiver side just before the accept/reject modal is shown.
+// Gives the sender meaningful feedback instead of a silent "Waiting…" state.
+socket.on("file-offer-seen", ({ from }) => {
+  // Only act if we are actually waiting for this peer's answer
+  if (!outgoingFile && !sendState.running) return;
+  const fileName = outgoingFile?.name || sendState.file?.name || "";
+  const msg = fileName
+    ? `<span class="muted">👀 Receiver is reviewing <b>${fileName}</b>…</span>`
+    : `<span class="muted">👀 Receiver is reviewing your file offer…</span>`;
+  addMsg(msg);
+  setStatus("Receiver is reviewing your file offer…");
+  if (typeof TransferAlerts !== "undefined") {
+    TransferAlerts.onWaitingForReady(fileName);
+  }
+  try {
+    const el = document.getElementById("tui-status-text");
+    if (el) { el.textContent = "Receiver is reviewing…"; el.className = "tui-status-active"; }
+    const fnEl = document.getElementById("tui-filename");
+    if (fnEl && fileName && fnEl.classList.contains("tui-idle")) {
+      fnEl.textContent = fileName; fnEl.classList.remove("tui-idle");
+    }
+  } catch {}
+});
 
 socket.on("file-answer", async ({ from, accepted }) => {
   if (!accepted) {
@@ -2050,6 +2589,42 @@ socket.on("file-answer", async ({ from, accepted }) => {
     }
     return;
   }
+
+  // ── BUG-FIX-STALE-ANSWER: guard against stale file-answer arriving while ──
+  // the DC is already open and a transfer is running (fast-path case).
+  //
+  // Sequence that caused "User-Initiated Abort":
+  //   1. FileN uses slow path → file-offer emitted → receiver queues file-answer
+  //   2. FileN transfer completes → softResetForNextFile keeps DC alive
+  //   3. FileN+1 uses FAST PATH (DC still open) → sendFile() called directly,
+  //      no new file-offer emitted, no new file-answer expected
+  //   4. Receiver's delayed file-answer for a re-offered or auto-accepted file
+  //      arrives here → makeOfferAndConnect(from) called unconditionally
+  //   5. createPeerConnectionFor closes the live DC with "User-Initiated Abort"
+  //   6. Sender DC closes → handlePeerFailed → reconnect → [ONOPEN] NO-OP
+  //      because outgoingFile/sending were cleared by the time DC reopens
+  //
+  // Fix: if DC is already open to this peer AND a transfer is actively running
+  // or queued, this file-answer is stale — drop it silently.
+  const existingDcOpen = window.dc?.readyState === "open" ||
+    getPeer(from)?.dc?.readyState === "open" ||
+    getPeer(_primaryPeerSocketId)?.dc?.readyState === "open";
+  const transferActive = sendState.running || (!!outgoingFile && sending);
+  if (existingDcOpen && transferActive) {
+    dlog("[FILE-ANSWER] stale answer dropped — DC already open and transfer running", from);
+    return;
+  }
+
+  // ── Also guard: if DC is open but we are between files (fast-path reset) ──
+  // softResetForNextFile keeps the DC alive. If a file-answer arrives during
+  // the brief window between softReset and the next sendFile(), calling
+  // makeOfferAndConnect would still kill the live connection unnecessarily.
+  // Recognise this by: DC open + _primaryPeerSocketId already set to this peer.
+  if (existingDcOpen && _primaryPeerSocketId === from) {
+    dlog("[FILE-ANSWER] stale answer dropped — DC already open to primary peer", from);
+    return;
+  }
+
   // Don't overwrite _primaryPeerSocketId if transfer already running with another peer
   if (!_primaryPeerSocketId) _primaryPeerSocketId = from;
   setStatus("Accepted. Connecting P2P...");
@@ -2065,12 +2640,30 @@ socket.on("file-answer", async ({ from, accepted }) => {
 // dc.bufferedAmount directly before each send. The channel drains asynchronously;
 // bufferedamountlow tells us when it's safe to send again.
 async function sendFile(file) {
+  // ── FIX-A: DOUBLE-START GUARD ────────────────────────────────────────────────
+  // Set running=true BEFORE any await so channel.onopen can't launch a second
+  // sendFile() coroutine for the same file during the detectAndApplyNetworkProfile
+  // yield window. Without this, an ICE restart that reopens the DC while sendFile()
+  // is awaiting its first async call sees running=false, finds outgoingFile set, and
+  // calls sendFile() again → two coroutines race, both send "meta", both start
+  // workers → interleaved chunks, corrupted files, wrong "Sending N of 7" counter.
+  if (sendState.running) {
+    dlog("sendFile: already running — dropping duplicate call for", file.name);
+    return;
+  }
+  sendState.running  = true;   // ← must be FIRST, before any await
+  sendState.canceled = false;
+
   const getDc = () => {
     const p = getPeer(_primaryPeerSocketId);
     return p?.dc?.readyState === "open" ? p.dc : null;
   };
 
-  if (!getDc()) { dlog("sendFile: no open DC"); return; }
+  if (!getDc()) {
+    sendState.running = false;   // release guard if DC already gone
+    dlog("sendFile: no open DC");
+    return;
+  }
 
   // Detect network profile first
   const primaryPeer = getPeer(_primaryPeerSocketId);
@@ -2083,7 +2676,8 @@ async function sendFile(file) {
   try { upsertSentItem(file._qid || `${file.name}|${file.size}`, file.name, file.size, "sending", 0, file.size); renderQueueUI(file); } catch {}
 
   pauseBtn.disabled = false; resumeBtn.disabled = true; cancelBtn.disabled = false;
-  sendState.running = true; sendState.paused = false; sendState.canceled = false;
+  // running already set above — just set the rest of state here
+  sendState.paused = false; sendState.canceled = false;
   sendState.offset = 0; sendState.file = file; sendState.ackBytes = 0;
   sendState.lastAckTickT = 0; sendState.lastAckTickB = 0; sendState.ackEma = 0;
   sendState.gotComplete = false; sendState.chunkIndex = 0;
@@ -2091,6 +2685,7 @@ async function sendFile(file) {
   sendState.pendingRetransmits = new Map();
   sendState.knownPeers = new Set();
   if (!_sessionSentStart) _sessionSentStart = performance.now(); // track session start
+<<<<<<< HEAD
 
 
   resetReceiverReady(); retryInProgress = false;
@@ -2099,6 +2694,25 @@ async function sendFile(file) {
     id: file._qid || `${file.name}|${file.size}`,
     name: file.name, size: file.size,
     type: file.type || "application/octet-stream"
+=======
+
+
+  // NOTE: resetReceiverReady() is intentionally NOT called here.
+  // startNextFile() already called it synchronously before invoking sendFile().
+  // Calling it again here (after the async detectAndApplyNetworkProfile await)
+  // would clobber a "ready" that the receiver sent immediately upon getting "meta"
+  // — causing waitReceiverReady() to hang for 120s and the file to be skipped.
+  retryInProgress = false;
+
+  sendMsg({ type: "meta", meta: {
+    id:        file._qid || `${file.name}|${file.size}`,
+    name:      file.name,
+    size:      file.size,
+    type:      file.type || "application/octet-stream",
+    // ZIP bundle metadata — tells receiver to auto-extract after download
+    zipBundle: file._zipBundle  || false,
+    zipFiles:  file._zipFiles   || null,
+>>>>>>> a862989 (added zip and unzip)
   }});
 
   setStatus(`Waiting receiver ready... (${file.name})`);
@@ -2461,6 +3075,14 @@ async function sendFile(file) {
     _finalizeLock = false;
     sendState.running = false; outgoingFile = null;
     pauseBtn.disabled = true; resumeBtn.disabled = true; cancelBtn.disabled = true;
+<<<<<<< HEAD
+=======
+    // BUG-FIX-TIMEOUT-STATE: mark file as "done" in history so the queue UI
+    // does not leave it stuck as "Sending" indefinitely. The complete-message
+    // path does this in the onmessage handler; the timeout path was missing it.
+    setStatus(`✅ Sent (confirmed): ${file.name}`);
+    try { upsertSentItem(file._qid || `${file.name}|${file.size}`, file.name, file.size, "done", file.size, file.size); renderQueueUI(null); } catch {}
+>>>>>>> a862989 (added zip and unzip)
     safeCloseAllPeers();   // sets gracefulClosing=true for 800ms
     sending = false;
     try { window.__enh?.onTransferComplete(file.size); } catch {}
@@ -2481,9 +3103,20 @@ async function sendFile(file) {
 }
 
 // ─── RECEIVER ─────────────────────────────────────────────────────────────────
-let pendingWritableStore = null;
 
 async function startReceiver(meta) {
+  // ── FIX-2: block new file while previous finalizeIncomingFile() is running ──
+  // finalizeIncomingFile() is async (SHA-256, SCTP flush, disk close).
+  // If the sender sends the next file's "meta" before it completes, the
+  // stale-state path below would null incomingFile prematurely and then
+  // finalizeIncomingFile's finally block would null it AGAIN, killing the
+  // new transfer mid-receive.  Queue the meta and retry once finalize ends.
+  if (incomingFile?.finalizing) {
+    dlog("startReceiver: previous file still finalizing — deferring meta for", meta.name);
+    _deferredRecvMeta = meta;
+    return;
+  }
+
   // ── RECONNECT guard ────────────────────────────────────────────────────────
   // If we already have an incomingFile for this same transfer (same id/name+size),
   // this is a re-delivery of "meta" after a reconnect — NOT a new transfer.
@@ -2508,6 +3141,16 @@ async function startReceiver(meta) {
       if (isGenuineReconnect) {
         dlog("startReceiver: genuine reconnect — resuming at", fmtBytes(incomingFile.receivedBytes));
         showToast(`🔄 Reconnected — resuming from ${fmtBytes(incomingFile.receivedBytes)}`, "info", 3000);
+<<<<<<< HEAD
+=======
+        // Restore "receiving" state — dc.onclose set it to "reconnecting" for UI feedback.
+        try {
+          const id = incomingFile.meta?.id || `${incomingFile.meta?.name}|${incomingFile.meta?.size}`;
+          upsertRecvItem(id, incomingFile.meta.name, incomingFile.meta.size || 0,
+            "receiving", incomingFile.receivedBytes || 0, incomingFile.meta.size || 0);
+          renderRecvQueueUI();
+        } catch {}
+>>>>>>> a862989 (added zip and unzip)
         try {
           window.dc?.send(JSON.stringify({ type: "ready" }));
         } catch(e) { dlog("ready send failed on reconnect:", e); }
@@ -2518,9 +3161,6 @@ async function startReceiver(meta) {
       // Reset so the fresh-start path below runs cleanly.
       dlog("startReceiver: stale incomingFile detected — resetting for fresh start",
         { receivedBytes: incomingFile.receivedBytes, sawDone: incomingFile.sawDone, finalizing: incomingFile.finalizing });
-      if (incomingFile.writable) {
-        incomingFile.writable.abort?.().catch(() => {});
-      }
       incomingFile = null;
       // BUG-FIX-NEXTFILE-3: also abort any stale pendingWritable that was set
       // for THIS transfer but never consumed (e.g. startReceiver was never
@@ -2543,8 +3183,11 @@ async function startReceiver(meta) {
   // fired yet if the next meta arrived quickly).
   transferCompleted = false;
 
+<<<<<<< HEAD
   const canDiskMode = (meta.size > MEMORY_MAX_BYTES) ||
                       ('showDirectoryPicker' in window && window.isSecureContext && pendingWritable !== null);
+=======
+>>>>>>> a862989 (added zip and unzip)
 
   incomingFile = {
     meta,
@@ -2552,8 +3195,11 @@ async function startReceiver(meta) {
     lastAckSent: 0,
     lastT: performance.now(), lastB: 0, ema: 0,
     chunks: [],
+<<<<<<< HEAD
     writable: null,
     writeChain: Promise.resolve(),
+=======
+>>>>>>> a862989 (added zip and unzip)
     sawDone: false, finalizing: false,
     expectedChecksums: new Map(),
     receivedChunkIndices: new Set(),
@@ -2564,6 +3210,7 @@ async function startReceiver(meta) {
   dlog("startReceiver", meta);
   try { const id = meta?.id || `${meta?.name}|${meta?.size}`; upsertRecvItem(id, meta.name, meta.size || 0, "receiving", 0, meta.size || 0); renderRecvQueueUI(); } catch {}
 
+<<<<<<< HEAD
   // Use disk streaming for large files. pendingWritable is normally set by
   // acceptBtn / auto-accept BEFORE the DC opens. But _acceptPendingFile now
   // emits file-answer before disk prep completes — the DC can open and meta
@@ -2601,6 +3248,8 @@ async function startReceiver(meta) {
   } else {
     // Small file: memory mode, no message needed
   }
+=======
+>>>>>>> a862989 (added zip and unzip)
 
   const primaryDc = window.dc;
   try { primaryDc?.send(JSON.stringify({ type: "ready" })); } catch {}
@@ -2608,7 +3257,6 @@ async function startReceiver(meta) {
 
 async function handleIncomingChunk(buf) {
   if (!incomingFile) return;
-  if (incomingFile.meta.size > MEMORY_MAX_BYTES && !incomingFile.writable) return;
 
   // Defensive: buf must be a non-empty ArrayBuffer
   if (!(buf instanceof ArrayBuffer) || buf.byteLength === 0) {
@@ -2633,6 +3281,7 @@ async function handleIncomingChunk(buf) {
     writeBuf = writeBuf.slice(0, allowed);
   }
 
+<<<<<<< HEAD
   if (incomingFile.writable) {
     // Disk mode: write at the exact byte position so any seek/resume is safe
     const writePosition = incomingFile.receivedBytes;
@@ -2672,6 +3321,10 @@ async function handleIncomingChunk(buf) {
     // Memory mode: store a copy so we own the memory regardless of DC GC
     incomingFile.chunks.push(writeBuf.slice(0));
   }
+=======
+  // Memory-only: accumulate chunk for later Blob assembly
+  incomingFile.chunks.push(writeBuf.slice(0));
+>>>>>>> a862989 (added zip and unzip)
 
   incomingFile.receivedBytes += writeBuf.byteLength;
 
@@ -2715,6 +3368,19 @@ async function handleIncomingChunk(buf) {
     const remaining = incomingFile.meta.size - incomingFile.receivedBytes;
     etaText.innerText = `Remaining: ${formatETA(incomingFile.ema > 0 ? remaining / incomingFile.ema : NaN)}`;
     incomingFile.lastT = now; incomingFile.lastB = incomingFile.receivedBytes;
+    // FIX-ALERTS: keep alert card live during active receive
+    if (typeof TransferAlerts !== "undefined") {
+      TransferAlerts.onProgress({
+        done:       incomingFile.receivedBytes,
+        total:      incomingFile.meta.size,
+        speedMbps:  incomingFile.ema / 1024 / 1024,
+        etaSec:     incomingFile.ema > 0 ? remaining / incomingFile.ema : NaN,
+        isSender:   false,
+        fileName:   incomingFile.meta.name,
+        fileIndex:  window._taFileIndex  || 1,
+        totalFiles: window._taTotalFiles || 1,
+      });
+    }
   }
 
   if (incomingFile.sawDone && incomingFile.receivedBytes >= incomingFile.meta.size && !incomingFile.finalizing) {
@@ -2745,6 +3411,7 @@ async function finalizeIncomingIfReady(sha256 = null) {
   // FIX-B: guard against multiple concurrent polls (e.g. doneResendTimer fires
   // sendMsg({type:"done"}) every 2s — each one calls finalizeIncomingIfReady
   // while receivedBytes < size, spawning a new poll each time → 22 concurrent polls)
+<<<<<<< HEAD
   if (incomingFile._polling) {
     dlog("done rx: poll already running — skipping duplicate");
     return;
@@ -2754,6 +3421,25 @@ async function finalizeIncomingIfReady(sha256 = null) {
     { received: incomingFile.receivedBytes, total: incomingFile.meta.size });
 
   const deadline = Date.now() + 10000;  // 10s — was 5s, too short for slow SCTP drain
+=======
+  // ── FIX-1: extend deadline on every resent "done" ────────────────────────
+  // The sender's doneResendTimer fires sendMsg({type:"done"}) every 1 second
+  // until it gets "complete" back.  Each delivery calls this function.
+  // OLD: a fixed 10s deadline started on the FIRST "done" → if SCTP was still
+  //      draining a backlogged chunk, the clock expired before it arrived.
+  // NEW: every subsequent "done" while _polling is already true resets the
+  //      deadline, giving the full 10s window after each heartbeat.
+  if (incomingFile._polling) {
+    incomingFile._pollDeadline = Date.now() + 10000;  // extend on every resent "done"
+    dlog("done rx: poll running — extending deadline");
+    return;
+  }
+  incomingFile._polling      = true;
+  incomingFile._pollDeadline = Date.now() + 10000;   // first deadline
+  dlog("done rx but bytes incomplete — polling for remaining bytes",
+    { received: incomingFile.receivedBytes, total: incomingFile.meta.size });
+
+>>>>>>> a862989 (added zip and unzip)
   const poll = setInterval(() => {
     if (!incomingFile) { clearInterval(poll); return; }
     if (incomingFile.receivedBytes >= incomingFile.meta.size) {
@@ -2763,18 +3449,37 @@ async function finalizeIncomingIfReady(sha256 = null) {
       finalizeIncomingFile().catch(e => {
         dlog("Finalize failed (poll path):", e);
       });
-    } else if (Date.now() > deadline) {
+    } else if (Date.now() > incomingFile._pollDeadline) {  // FIX-1: use per-file deadline
       clearInterval(poll);
       dlog("finalizeIncomingIfReady: poll timeout — clearing stale incomingFile",
         { received: incomingFile.receivedBytes, total: incomingFile.meta.size });
       if (incomingFile && !incomingFile.finalizing) {
-        if (incomingFile.writable) incomingFile.writable.abort?.().catch(() => {});
+        // ── FIX-C: mark file as "failed" in history so the queue UI shows it ──
+        // Old code: silently nulled incomingFile — user saw generic "Transfer
+        // incomplete" with no filename and the queue entry stayed as "receiving".
+        const failedMeta = incomingFile.meta;
+        const failedRecv = incomingFile.receivedBytes;
         incomingFile = null;
+<<<<<<< HEAD
         setStatus("⚠️ Transfer incomplete — please retry");
         addMsg(`<span class="muted">⚠️ Transfer incomplete. Please retry.</span>`);
         // Do NOT call cancelTransfer here — it sends a "cancel" socket event
         // which shows as "receiver canceled transfer" on the sender side, which
         // is misleading. The sender already moved on; just reset locally.
+=======
+        if (failedMeta) {
+          const fid = failedMeta.id || `${failedMeta.name}|${failedMeta.size}`;
+          upsertRecvItem(fid, failedMeta.name, failedMeta.size, "failed", failedRecv, failedMeta.size);
+          try { renderRecvQueueUI(); } catch {}
+          const shortName = failedMeta.name.length > 40
+            ? failedMeta.name.slice(0, 38) + "…" : failedMeta.name;
+          setStatus(`⚠️ Incomplete: ${shortName} — please resend`);
+          addMsg(`<span class="muted">⚠️ <b>${failedMeta.name}</b> incomplete (${fmtBytes(failedRecv)} of ${fmtBytes(failedMeta.size)} received). Ask sender to resend this file.</span>`);
+        } else {
+          setStatus("⚠️ Transfer incomplete — please retry");
+          addMsg(`<span class="muted">⚠️ Transfer incomplete. Please retry.</span>`);
+        }
+>>>>>>> a862989 (added zip and unzip)
         transferCompleted = false;
       }
     }
@@ -2783,8 +3488,11 @@ async function finalizeIncomingIfReady(sha256 = null) {
 
 async function finalizeIncomingFile() {
   if (!incomingFile) return;
+<<<<<<< HEAD
   const writableRef  = incomingFile.writable;
   const chainRef     = incomingFile.writeChain;
+=======
+>>>>>>> a862989 (added zip and unzip)
   const meta         = incomingFile.meta;
   const expectedSha  = incomingFile.expectedSha256 || null;
   // Capture the exact incomingFile object so the finally block can check
@@ -2825,14 +3533,7 @@ async function finalizeIncomingFile() {
     } catch { return true; } // verification error → don't block download
   }
   try {
-    if (writableRef) {
-      await chainRef;
-      await writableRef.close();
-      setStatus(`✅ Saved: ${meta.name}`);
-      try { const id = meta?.id || `${meta?.name}|${meta?.size}`; upsertRecvItem(id, meta.name, meta.size||0, "done", meta.size||0, meta.size||0); renderRecvQueueUI(); } catch {}
-      addMsg(`<b>Saved to disk:</b> ${meta.name}`);
-      addToDownloadsManager({ name: meta.name, size: meta.size, type: meta.type, savedToDisk: true, url: null });
-    } else {
+    {
       const blob = new Blob(incomingFile.chunks, { type: meta.type });
       // ── Sanity check: blob must be exactly meta.size bytes ────────────────
       // If blob is smaller, chunks[] was incomplete — log and abort rather than
@@ -2849,6 +3550,7 @@ async function finalizeIncomingFile() {
       }
       const url  = URL.createObjectURL(blob);
 
+<<<<<<< HEAD
       // ── Auto-download immediately — don't wait for SHA-256 ───────────────
       // SHA-256 of a 30-37MB file takes 5-15s on mobile. Running it before
       // auto-download blocked "complete" from being sent, causing the sender's
@@ -2869,6 +3571,130 @@ async function finalizeIncomingFile() {
         verifySha256(blob).then(ok => {
           if (!ok) addMsg(`<span class="muted">⚠️ Integrity check failed for ${meta.name} — file may be corrupt.</span>`);
         }).catch(() => {});
+=======
+      // ── ZIP BUNDLE: auto-extract instead of downloading the raw zip ───────
+      if (meta.zipBundle && meta.zipFiles && typeof fflate !== "undefined") {
+        setStatus(`📦 Extracting ${meta.zipFiles.length} files…`);
+        addMsg(`<span class="muted">📦 Bundle received — extracting ${meta.zipFiles.length} files…</span>`);
+
+        // Mark bundle entry as "extracting" in history
+        try { const id = meta?.id || `${meta?.name}|${meta?.size}`; upsertRecvItem(id, meta.name, meta.size||0, "extracting", meta.size||0, meta.size||0); renderRecvQueueUI(); } catch {}
+
+        // fflate.unzip is async-callback — works on the ArrayBuffer
+        blob.arrayBuffer().then(ab => {
+          fflate.unzip(new Uint8Array(ab), (err, files) => {
+            if (err) {
+              dlog("[ZIP] Extraction failed:", err);
+              setStatus(`⚠️ Extraction failed — downloading zip instead`);
+              addMsg(`<span class="muted">⚠️ Could not extract bundle — downloading zip file directly.</span>`);
+              // Fall back: download raw zip
+              try {
+                const a = document.createElement("a");
+                a.href = url; a.download = meta.name; a.style.display = "none";
+                document.body.appendChild(a); a.click(); document.body.removeChild(a);
+              } catch {}
+              try { const id = meta?.id || `${meta?.name}|${meta?.size}`; upsertRecvItem(id, meta.name, meta.size||0, "done", meta.size||0, meta.size||0); renderRecvQueueUI(); } catch {}
+              return;
+            }
+
+            const entries = Object.entries(files);
+            dlog(`[ZIP] Extracted ${entries.length} files`);
+
+            // Download each extracted file individually with a small stagger
+            // to avoid the browser blocking rapid-fire a.click() calls.
+            let downloadIndex = 0;
+            function downloadNext() {
+              if (downloadIndex >= entries.length) {
+                // All done — update UI
+                setStatus(`✅ Extracted ${entries.length} files`);
+                addMsg(`<b>✅ Extracted ${entries.length} files from bundle</b>`);
+
+                // Add each file to downloads manager + recv history
+                entries.forEach(([name, data]) => {
+                  const fileInfo = (meta.zipFiles || []).find(f => f.name === name) || {};
+                  const fileBlob = new Blob([data], { type: fileInfo.type || "application/octet-stream" });
+                  const fileUrl  = URL.createObjectURL(fileBlob);
+                  try { upsertRecvItem(`zip:${name}`, name, data.byteLength, "done", data.byteLength, data.byteLength); } catch {}
+                  addToDownloadsManager({ name, size: data.byteLength, type: fileInfo.type || "application/octet-stream", savedToDisk: true, url: fileUrl });
+                });
+
+                // Update the bundle entry as done
+                try { const id = meta?.id || `${meta?.name}|${meta?.size}`; upsertRecvItem(id, meta.name, meta.size||0, "done", meta.size||0, meta.size||0); renderRecvQueueUI(); } catch {}
+
+                if (typeof TransferAlerts !== "undefined") {
+                  TransferAlerts.onComplete({
+                    fileName: `${entries.length} files extracted`,
+                    fileSizeBytes: meta.size,
+                    isSender: false,
+                    allDone: fileQueue.length === 0 && !sendState.running,
+                    totalFiles: window._taTotalFiles || 1,
+                  });
+                }
+                return;
+              }
+
+              const [name, data] = entries[downloadIndex++];
+              const fileInfo = (meta.zipFiles || []).find(f => f.name === name) || {};
+              const fileBlob = new Blob([data], { type: fileInfo.type || "application/octet-stream" });
+              const fileUrl  = URL.createObjectURL(fileBlob);
+              try {
+                const a = document.createElement("a");
+                a.href = fileUrl; a.download = name; a.style.display = "none";
+                document.body.appendChild(a); a.click(); document.body.removeChild(a);
+              } catch(e) { dlog("extract download click failed:", name, e); }
+
+              addMsg(`<span class="muted">⬇️ Downloaded: ${name} (${fmtBytes(data.byteLength)})</span>`);
+              // Stagger downloads 300ms apart — avoids browser popup blockers
+              setTimeout(downloadNext, 300);
+            }
+            downloadNext();
+          });
+        }).catch(err => {
+          dlog("[ZIP] ArrayBuffer conversion failed:", err);
+          // Fall back to raw zip download
+          try {
+            const a = document.createElement("a");
+            a.href = url; a.download = meta.name; a.style.display = "none";
+            document.body.appendChild(a); a.click(); document.body.removeChild(a);
+          } catch {}
+          try { const id = meta?.id || `${meta?.name}|${meta?.size}`; upsertRecvItem(id, meta.name, meta.size||0, "done", meta.size||0, meta.size||0); renderRecvQueueUI(); } catch {}
+        });
+
+      } else {
+        // ── Normal single file: auto-download immediately ─────────────────
+        // SHA-256 of a 30-37MB file takes 5-15s on mobile. Running it before
+        // auto-download blocked "complete" from being sent, causing the sender's
+        // 20s timeout to fire. Download now; verify in background.
+        try {
+          const a = document.createElement("a");
+          a.href = url; a.download = meta.name; a.style.display = "none";
+          document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        } catch(e) { dlog("auto-download click failed:", e); }
+
+        setStatus(`✅ Received: ${meta.name}`);
+        try { const id = meta?.id || `${meta?.name}|${meta?.size}`; upsertRecvItem(id, meta.name, meta.size||0, "done", meta.size||0, meta.size||0); renderRecvQueueUI(); } catch {}
+        addMsg(`<b>File received:</b> ${meta.name}`);
+        addToDownloadsManager({ name: meta.name, size: meta.size, type: meta.type, savedToDisk: true, url });
+
+        // FIX-ALERTS: show received complete card
+        if (typeof TransferAlerts !== "undefined") {
+          const allDone = fileQueue.length === 0 && !sendState.running;
+          TransferAlerts.onComplete({
+            fileName:      meta.name,
+            fileSizeBytes: meta.size,
+            isSender:      false,
+            allDone,
+            totalFiles:    window._taTotalFiles || 1,
+          });
+        }
+
+        // SHA-256 in background — does not block "complete" or next file
+        if (expectedSha) {
+          verifySha256(blob).then(ok => {
+            if (!ok) addMsg(`<span class="muted">⚠️ Integrity check failed for ${meta.name} — file may be corrupt.</span>`);
+          }).catch(() => {});
+        }
+>>>>>>> a862989 (added zip and unzip)
       }
     }
 
@@ -2912,6 +3738,12 @@ async function finalizeIncomingFile() {
       const _popupFiles2   = _sessionRecvFiles;
       const _popupBytes2   = _sessionRecvBytes;
       const _popupElapsed2 = (_sessionRecvStart > 0) ? Math.round((performance.now() - _sessionRecvStart) / 1000) : 0;
+<<<<<<< HEAD
+=======
+      // FIX-D: per-file rows for detailed summary
+      const _popupRows2 = recvHistory.slice(-Math.max(_popupFiles2, 1))
+        .map(r => ({ name: r.name, size: r.size, state: r.state }));
+>>>>>>> a862989 (added zip and unzip)
       _sessionRecvFiles = 0; _sessionRecvBytes = 0; _sessionRecvStart = 0;
       setTimeout(() => showCompletionPopup({
         title: "All Files Received! 🎉",
@@ -2920,6 +3752,10 @@ async function finalizeIncomingFile() {
           { value: _popupFiles2.toString(), label: _popupFiles2 !== 1 ? "Files Received" : "File Received" },
           { value: `${_popupElapsed2}s`, label: "Time Taken" },
         ],
+<<<<<<< HEAD
+=======
+        fileRows: _popupRows2,
+>>>>>>> a862989 (added zip and unzip)
         btnText: "Great!",
       }), 400);
     }
@@ -2936,6 +3772,16 @@ async function finalizeIncomingFile() {
     if (incomingFile === thisIncoming) {
       incomingFile = null;
     }
+<<<<<<< HEAD
+=======
+    // FIX-2: if a meta was deferred because we were finalizing, start it now
+    if (_deferredRecvMeta) {
+      const m = _deferredRecvMeta;
+      _deferredRecvMeta = null;
+      dlog("startReceiver: firing deferred meta for", m.name);
+      setTimeout(() => startReceiver(m), 0);
+    }
+>>>>>>> a862989 (added zip and unzip)
   }
 }
 

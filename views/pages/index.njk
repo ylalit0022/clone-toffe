@@ -220,63 +220,36 @@
 
           <!-- FILE TRANSFER PANEL -->
           <div class="reveal-panel" id="filePanel">
-            <div class="g-card strip-amb">
-              <div class="g-card-body">
-                <div class="section-label">Send Files</div>
+            <div class="g-card" style="border:none;background:transparent;box-shadow:none;">
+              <div class="g-card-body" id="tui-card-body" style="padding:0;">
+                <!--
+                  ALL IDs that script.js reads at parse time live here as static HTML.
+                  transfer-ui.js replaces the visual content but keeps these IDs in DOM.
+                  Never remove: fileInput, fileStatus, progressBar, progressText,
+                  speedText, etaText, pauseBtn, resumeBtn, cancelBtn, progressFill.
+                -->
 
-                <!-- Drop zone -->
-                <div class="drop-zone" id="dropZone">
-                  <input type="file" id="fileInput" multiple />
-                  <div class="drop-icon-wrap">
-                    <span class="drop-icon" style="margin:0;">&#128194;</span>
-                  </div>
-                  <div class="drop-title">Drop files here, or click to browse</div>
-                  <div class="drop-sub">Any type &middot; No size cap &middot; P2P &middot; Never stored</div>
-                  <div class="dz-divider">or browse</div>
+                <!-- Hidden static elements for script.js — DO NOT REMOVE -->
+                <div style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);pointer-events:none;" aria-hidden="true">
+                  <input  type="file" id="fileInput" multiple tabindex="-1" />
+                  <span   id="fileStatus"></span>
+                  <progress id="progressBar" value="0" max="100"></progress>
+                  <span   id="progressText">0%</span>
+                  <span   id="speedText">Speed: 0 MB/s</span>
+                  <span   id="etaText">Remaining: --</span>
+                  <div    id="progressFill"></div>
+                  <button id="pauseBtn"  disabled>Pause</button>
+                  <button id="resumeBtn" disabled>Resume</button>
+                  <button id="cancelBtn" disabled>Cancel</button>
                 </div>
 
-                <div class="g-divider"></div>
-
-                <!-- Status -->
-                <div id="fileStatus" class="mb-3">
-                  <span style="color:var(--muted2);font-size:13px;">&#9679;</span> Idle
-                </div>
-
-                <!-- Progress bar -->
-                <div class="progress-rail mb-1">
-                  <div class="progress-fill" id="progressFill"></div>
-                </div>
-                <progress id="progressBar" value="0" max="100"></progress>
-
-                <!-- Stats + controls: wrap on mobile, align right on sm+ -->
-                <div class="row g-2 align-items-center mt-3">
-                  <!-- Stat pills: wrap on xs -->
-                  <div class="col-12 col-sm">
-                    <div class="d-flex flex-wrap gap-2">
-                      <div class="stat-pill stat-pill--fixed">Progress <b id="progressText">0%</b></div>
-                      <div id="speedText" class="stat-pill stat-pill--fixed">Speed <b>0 MB/s</b></div>
-                      <div id="etaText"   class="stat-pill stat-pill--fixed">ETA <b>--</b></div>
-                    </div>
-                  </div>
-                  <!-- Control buttons: full-width on xs, auto on sm+ -->
-                  <div class="col-12 col-sm-auto">
-                    <div class="d-flex flex-wrap gap-2">
-                      <button class="btn-ghost btn-sm-custom flex-fill flex-sm-grow-0"
-                        id="pauseBtn"  disabled>&#9208; Pause</button>
-                      <button class="btn-em    btn-sm-custom flex-fill flex-sm-grow-0"
-                        id="resumeBtn" disabled>&#9654; Resume</button>
-                      <button class="btn-danger btn-sm-custom flex-fill flex-sm-grow-0"
-                        id="cancelBtn" disabled>&#10005; Cancel</button>
-                    </div>
-                  </div>
-                </div>
+                <!-- transfer-ui.js mounts the dial UI here -->
+                <div id="tui-mount-target"></div>
 
               </div>
             </div>
-            <!-- Queue panels injected here by script.js (Queue, Receiver Queue,
-                 Diagnostics, Received Files). Kept outside the card so they
-                 do NOT render inside the drag-drop zone. -->
-            <div id="filePanelQueues" style="margin-top:0;"></div>
+            <!-- filePanelQueues: outside the card as script.js expects -->
+            <div id="filePanelQueues" style="display:none;"></div>
           </div>
           <!-- /filePanel -->
 
@@ -349,7 +322,7 @@
 <script src="/socket.io/socket.io.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 
-<!-- BRIDGE 1: native progress.value -> visual fill bar -->
+<!-- BRIDGE 1: native progress.value -> visual fill bar (kept for compat) -->
 <script>
 (function(){
   var native = document.getElementById('progressBar');
@@ -357,6 +330,7 @@
   if (!native || !fill) return;
   var proto = HTMLProgressElement.prototype;
   var desc  = Object.getOwnPropertyDescriptor(proto, 'value');
+  if (!desc || Object.getOwnPropertyDescriptor(native, 'value')) return;
   Object.defineProperty(native, 'value', {
     get: function()  { return desc.get.call(this); },
     set: function(v) {
@@ -761,7 +735,11 @@ function handleQrImageUpload(input) {
 }
 </script>
 
+<!-- fflate: fast in-browser ZIP (sender compress + receiver extract) -->
+<script src="https://cdn.jsdelivr.net/npm/fflate@0.8.2/umd/index.js"></script>
 <script src="multiroom.js"></script>
+<script src="transfer-alerts.js"></script>
+<script src="transfer-ui.js"></script>
 <script src="script.js"></script>
 <script src="enhancements.js"></script>
 {% endblock %}

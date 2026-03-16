@@ -704,6 +704,104 @@ function formatETA(s) {
   if (!isFinite(s) || s <= 0) return "--";
   return `${Math.floor(s / 60)}m ${Math.floor(s % 60)}s`;
 }
+
+// ── Extraction progress modal ──────────────────────────────────────────────────
+// Shows a centered overlay while a received zip bundle is being extracted.
+// _showExtractionModal(total)                         — create and show
+// _updateExtractionModal(done, total, currentName)   — live counter update
+// _hideExtractionModal()                              — remove from DOM
+(function _installExtractionModalStyles() {
+  if (document.getElementById("_extModal-style")) return;
+  const style = document.createElement("style");
+  style.id = "_extModal-style";
+  style.textContent = `
+    #_extModal-overlay {
+      position: fixed; inset: 0; z-index: 99999;
+      background: rgba(0,0,0,.52);
+      display: flex; align-items: center; justify-content: center;
+      animation: _extFadeIn .18s ease;
+    }
+    @keyframes _extFadeIn { from { opacity:0; } to { opacity:1; } }
+    #_extModal-box {
+      background: #fff; border-radius: 18px;
+      padding: 28px 32px 24px;
+      min-width: 260px; max-width: 340px; width: 88vw;
+      box-shadow: 0 16px 48px rgba(0,0,0,.22);
+      text-align: center;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    @media (prefers-color-scheme: dark) {
+      #_extModal-box { background: #1c1c1e; color: #f0f0f0; }
+      #_extModal-fname { color: #aaa !important; }
+    }
+    #_extModal-spinner {
+      width: 44px; height: 44px; border-radius: 50%;
+      border: 4px solid rgba(5,150,105,.15);
+      border-top-color: #059669;
+      animation: _extSpin .7s linear infinite;
+      margin: 0 auto 16px;
+    }
+    @keyframes _extSpin { to { transform: rotate(360deg); } }
+    #_extModal-title {
+      font-size: 16px; font-weight: 700;
+      margin-bottom: 6px; color: inherit;
+    }
+    #_extModal-counter {
+      font-size: 28px; font-weight: 800; letter-spacing: -.02em;
+      color: #059669; margin-bottom: 4px;
+    }
+    #_extModal-total {
+      font-size: 13px; color: #888; margin-bottom: 12px;
+    }
+    #_extModal-pb-track {
+      width: 100%; height: 6px; border-radius: 3px;
+      background: rgba(5,150,105,.12); overflow: hidden; margin-bottom: 12px;
+    }
+    #_extModal-pb-fill {
+      height: 100%; border-radius: 3px;
+      background: linear-gradient(90deg, #059669, #10b981);
+      transition: width .35s ease;
+    }
+    #_extModal-fname {
+      font-size: 11px; color: #999;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      max-width: 100%; margin-top: 2px;
+    }
+  `;
+  document.head.appendChild(style);
+})();
+
+function _showExtractionModal(totalFiles) {
+  _hideExtractionModal(); // ensure no duplicate
+  const overlay = document.createElement("div");
+  overlay.id = "_extModal-overlay";
+  overlay.innerHTML = `
+    <div id="_extModal-box">
+      <div id="_extModal-spinner"></div>
+      <div id="_extModal-title">\u{1F4E6} Extracting Files</div>
+      <div id="_extModal-counter">0</div>
+      <div id="_extModal-total">of ${totalFiles} files</div>
+      <div id="_extModal-pb-track"><div id="_extModal-pb-fill" style="width:0%"></div></div>
+      <div id="_extModal-fname">Starting\u2026</div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+}
+
+function _updateExtractionModal(doneSoFar, total, currentFileName) {
+  const counter = document.getElementById("_extModal-counter");
+  const fill    = document.getElementById("_extModal-pb-fill");
+  const fname   = document.getElementById("_extModal-fname");
+  if (counter) counter.textContent = doneSoFar;
+  if (fill)    fill.style.width = `${Math.round((doneSoFar / total) * 100)}%`;
+  if (fname)   fname.textContent = currentFileName || "";
+}
+
+function _hideExtractionModal() {
+  const el = document.getElementById("_extModal-overlay");
+  if (el) el.remove();
+}
+
 function resetTransferUI() {
   progressBar.value = 0;
   if (typeof fileStatus !== "undefined") fileStatus.innerText = ""; // FIX: clear stale ✅ so enhancements.js poll doesn't re-fire toast loop
@@ -3204,10 +3302,22 @@ async function finalizeIncomingFile() {
       }
       const url  = URL.createObjectURL(blob);
 
-      // ── ZIP BUNDLE: auto-extract instead of downloading the raw zip ───────
+      // ── ZIP BUNDLE: download raw zip first, then auto-extract each file ──────
       if (meta.zipBundle && meta.zipFiles && typeof fflate !== "undefined") {
         setStatus(`📦 Extracting ${meta.zipFiles.length} files…`);
         addMsg(`<span class="muted">📦 Bundle received — extracting ${meta.zipFiles.length} files…</span>`);
+
+        // ── 1. Download raw zip immediately (safety net for Chrome multi-download deny) ──
+        // This fires first so the zip is always saved even if user denies later prompts.
+        try {
+          const zipA = document.createElement("a");
+          zipA.href = url; zipA.download = meta.name; zipA.style.display = "none";
+          document.body.appendChild(zipA); zipA.click(); document.body.removeChild(zipA);
+          addToDownloadsManager({ name: meta.name, size: meta.size, type: "application/zip", savedToDisk: true, url });
+        } catch(e) { dlog("[ZIP] Raw zip download failed:", e); }
+
+        // ── 2. Show extraction progress modal ─────────────────────────────────
+        _showExtractionModal(meta.zipFiles.length);
 
         // Mark bundle entry as "extracting" in history
         try { const id = meta?.id || `${meta?.name}|${meta?.size}`; upsertRecvItem(id, meta.name, meta.size||0, "extracting", meta.size||0, meta.size||0); renderRecvQueueUI(); } catch {}
@@ -3217,14 +3327,9 @@ async function finalizeIncomingFile() {
           fflate.unzip(new Uint8Array(ab), (err, files) => {
             if (err) {
               dlog("[ZIP] Extraction failed:", err);
-              setStatus(`⚠️ Extraction failed — downloading zip instead`);
-              addMsg(`<span class="muted">⚠️ Could not extract bundle — downloading zip file directly.</span>`);
-              // Fall back: download raw zip
-              try {
-                const a = document.createElement("a");
-                a.href = url; a.download = meta.name; a.style.display = "none";
-                document.body.appendChild(a); a.click(); document.body.removeChild(a);
-              } catch {}
+              _hideExtractionModal();
+              setStatus(`⚠️ Extraction failed — zip already downloaded above`);
+              addMsg(`<span class="muted">⚠️ Could not extract bundle — raw zip was already saved.</span>`);
               try { const id = meta?.id || `${meta?.name}|${meta?.size}`; upsertRecvItem(id, meta.name, meta.size||0, "done", meta.size||0, meta.size||0); renderRecvQueueUI(); } catch {}
               return;
             }
@@ -3237,7 +3342,8 @@ async function finalizeIncomingFile() {
             let downloadIndex = 0;
             function downloadNext() {
               if (downloadIndex >= entries.length) {
-                // All done — update UI
+                // All done — hide modal, update UI
+                _hideExtractionModal();
                 setStatus(`✅ Extracted ${entries.length} files`);
                 addMsg(`<b>✅ Extracted ${entries.length} files from bundle</b>`);
 
@@ -3269,6 +3375,10 @@ async function finalizeIncomingFile() {
               const fileInfo = (meta.zipFiles || []).find(f => f.name === name) || {};
               const fileBlob = new Blob([data], { type: fileInfo.type || "application/octet-stream" });
               const fileUrl  = URL.createObjectURL(fileBlob);
+
+              // Update modal counter before each download
+              _updateExtractionModal(downloadIndex, entries.length, name);
+
               try {
                 const a = document.createElement("a");
                 a.href = fileUrl; a.download = name; a.style.display = "none";
@@ -3283,12 +3393,9 @@ async function finalizeIncomingFile() {
           });
         }).catch(err => {
           dlog("[ZIP] ArrayBuffer conversion failed:", err);
-          // Fall back to raw zip download
-          try {
-            const a = document.createElement("a");
-            a.href = url; a.download = meta.name; a.style.display = "none";
-            document.body.appendChild(a); a.click(); document.body.removeChild(a);
-          } catch {}
+          _hideExtractionModal();
+          // Raw zip was already downloaded above — just update history
+          addMsg(`<span class="muted">⚠️ Extraction error — raw zip was already saved.</span>`);
           try { const id = meta?.id || `${meta?.name}|${meta?.size}`; upsertRecvItem(id, meta.name, meta.size||0, "done", meta.size||0, meta.size||0); renderRecvQueueUI(); } catch {}
         });
 

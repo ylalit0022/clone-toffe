@@ -13,7 +13,13 @@
 //    GHOST_KEY=a9cde61d55d1a6f9833ba5d7a2   (Content API key)
 // ═══════════════════════════════════════════════════════════════
 
-const { createClient } = require("redis");
+// Redis is optional — if not installed, caching is silently disabled
+let createClient = null;
+try {
+  createClient = require("redis").createClient;
+} catch(e) {
+  console.warn("[GhostCache] redis package not found — running without cache (blog still works)");
+}
 
 const GHOST_URL  = (process.env.GHOST_URL  || "http://localhost:2368").replace(/\/$/, "");
 const GHOST_KEY  = process.env.GHOST_CONTENT_KEY   || "a9cde61d55d1a6f9833ba5d7a2";
@@ -28,7 +34,7 @@ let _redis = null;
 async function getRedis() {
   if (_redis) return _redis;
   const url = process.env.REDIS_URL;
-  if (!url) return null;
+  if (!url || !createClient) return null;
   try {
     _redis = createClient({ url });
     _redis.on("error", e => console.warn("[GhostCache] Redis error:", e.message));

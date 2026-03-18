@@ -1,0 +1,89 @@
+{
+  "kind": "collectionType",
+  "collectionName": "posts",
+  "info": {
+    "singularName": "post",
+    "pluralName": "posts",
+    "displayName": "Post"
+  },
+  "options": {
+    "draftAndPublish": true
+  },
+  "pluginOptions": {},
+  "attributes": {
+    "Title": {
+      "type": "string"
+    },
+    "Slug": {
+      "type": "uid"
+    },
+    "Description": {
+      "type": "text"
+    },
+    "Content": {
+      "type": "blocks"
+    },
+    "CoverImage": {
+      "type": "media",
+      "multiple": false,
+      "allowedTypes": [
+        "images",
+        "files",
+        "videos",
+        "audios"
+      ]
+    },
+    "Category": {
+      "type": "string"
+    },
+    "PublishedDate": {
+      "type": "date"
+    },
+    "metaTitle": {
+      "type": "string",
+      "minLength": 60
+    },
+    "metaDescription": {
+      "type": "text",
+      "minLength": 160
+    },
+    "canonicalUrl": {
+      "type": "string"
+    },
+    "schemaType": {
+      "type": "enumeration",
+      "enum": [
+        "Article",
+        "WebPage",
+        "SoftwareApplication",
+        "FAQPage",
+        "HowTo"
+      ]
+    },
+    "ogImage": {
+      "type": "media",
+      "multiple": false,
+      "allowedTypes": [
+        "images",
+        "files",
+        "videos",
+        "audios"
+      ]
+    },
+    "ogTitle": {
+      "type": "string"
+    },
+    "ogDescription": {
+      "type": "text"
+    },
+    "noIndex": {
+      "type": "boolean"
+    },
+    "author": {
+      "type": "relation",
+      "relation": "manyToOne",
+      "target": "api::author.author",
+      "inversedBy": "posts"
+    }
+  }
+}

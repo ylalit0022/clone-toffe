@@ -2,9 +2,9 @@
 
 {% block title %}Tranzo – Free P2P File Transfer, No Upload, No Limits{% endblock %}
 {% block metaDesc %}Transfer files directly between devices for free using WebRTC. No cloud, no signup, no size limits. 100% private P2P file sharing.{% endblock %}
-{% block canonical %}<link rel="canonical" href="https://share.rumnnlg.com/" />{% endblock %}
+{% block canonical %}<link rel="canonical" href="{{ siteUrl }}/" />{% endblock %}
 {% block ogTitle %}Tranzo – Free P2P File Transfer{% endblock %}
-{% block ogUrl %}https://share.rumnnlg.com/{% endblock %}
+{% block ogUrl %}{{ siteUrl }}/{% endblock %}
 
 {# ── INDEX overrides the navbar block with the connection-pill nav ── #}
 {% block navbar %}
@@ -205,14 +205,30 @@
           <!-- CHAT PANEL -->
           <div class="reveal-panel" id="chatPanel">
             <div class="g-card" id="chatSection">
-              <div class="g-card-body">
+              <div class="g-card-body" style="padding-bottom:12px;">
                 <div class="section-label">Live Chat</div>
-                <div id="chatBox"></div>
-                <!-- Input row: input grows, button stays right -->
+
+                <!-- Chat messages only — user chat bubbles go here -->
+                <div id="chatBox" style="min-height:220px;max-height:340px;overflow-y:auto;"></div>
+
+                <!-- Input row -->
                 <div class="d-flex gap-2 mt-3">
                   <input class="g-input flex-grow-1" type="text" id="messageInput"
                     placeholder="Say something&hellip;" />
                   <button class="btn-amb btn-sm-custom flex-shrink-0" id="sendBtn">Send &#8593;</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- System / transfer log — separate from chat, collapsible -->
+            <div id="sysLogWrap" style="display:none;margin-top:8px;">
+              <div class="g-card" style="border:1px solid rgba(0,0,0,.07);background:rgba(248,250,251,.9);box-shadow:none;">
+                <div class="g-card-body" style="padding:10px 14px;">
+                  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;cursor:pointer;" onclick="toggleSysLog()">
+                    <span style="font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:#9ca3af;">Transfer Log</span>
+                    <span id="sysLogToggleIcon" style="font-size:13px;color:#9ca3af;transition:transform .2s;">▾</span>
+                  </div>
+                  <div id="sysLog" style="max-height:120px;overflow-y:auto;font-size:12px;color:#6b7280;line-height:1.6;"></div>
                 </div>
               </div>
             </div>

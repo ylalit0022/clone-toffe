@@ -35,7 +35,13 @@ export function applyProfile({ pathType, rttMs, availBps } = {}) {
   } else if (pt === "wan") {
     NET.chunkSize = 256 * 1024;
   } else if (pt === "turn") {
-    NET.chunkSize = NET.slowReduced ? 64 * 1024 : 128 * 1024;
+    // TURN speed improvement:
+    // - Default 128KB chunks (was 128KB — keep for compatibility)
+    // - slowReduced drops to 32KB (was 64KB) to recover from severe congestion
+    // - highRtt (>200ms) stays at 64KB to avoid buffer bloat
+    if (NET.slowReduced)        NET.chunkSize = 32 * 1024;   // severe slow path
+    else if (rtt > 200)        NET.chunkSize = 64 * 1024;   // high-latency TURN
+    else                       NET.chunkSize = 128 * 1024;  // normal TURN
   } else {
     NET.chunkSize = 256 * 1024;   // unknown — conservative
   }
@@ -49,7 +55,9 @@ export function applyProfile({ pathType, rttMs, availBps } = {}) {
     if (rtt < 5)        depth = 8;
     else if (rtt < 30)  depth = 12;
     else if (rtt < 100) depth = 16;
-    else                depth = IS_MOBILE ? 12 : 24;
+    // High RTT (>100ms) = TURN relay — use smaller pipeline to avoid congestion
+    else if (rtt < 200) depth = IS_MOBILE ? 10 : 20;
+    else                depth = IS_MOBILE ?  6 : 12;  // very high latency
   }
   NET.pipelineDepth = Math.max(4, Math.min(32, depth));
 
@@ -87,7 +95,7 @@ export async function detectAndApply(pc) {
 }
 
 // Record one throughput sample; returns true if slow-TURN reduction fired
-const SLOW_THRESHOLD = 512 * 1024;   // 512 KB/s
+const SLOW_THRESHOLD = 256 * 1024;   // 256 KB/s — trigger reduction earlier on slow TURN
 const SLOW_SAMPLES   = 3;
 
 export function recordThroughputSample(bps) {

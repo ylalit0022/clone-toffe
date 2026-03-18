@@ -2,8 +2,8 @@
 
 {% block title %}Cookie Policy – Tranzo{% endblock %}
 {% block metaDesc %}How Tranzo uses cookies and local storage. We use minimal cookies — only what's needed for the service and advertising to keep Tranzo free.{% endblock %}
-{% block canonical %}<link rel="canonical" href="https://share.rumnnlg.com/cookies" />{% endblock %}
-{% block ogUrl %}https://share.rumnnlg.com/cookies{% endblock %}
+{% block canonical %}<link rel="canonical" href="{{ siteUrl }}/cookies" />{% endblock %}
+{% block ogUrl %}{{ siteUrl }}/cookies{% endblock %}
 
 {% block content %}
 <main class="content-page">
@@ -13,7 +13,7 @@
         <div class="page-eyebrow">&#127850; Legal</div>
         <h1>Cookie <span class="grad">Policy</span></h1>
         <p class="lead">Last updated: <strong>January 2025</strong></p>
-        <p>This policy explains how Tranzo uses cookies and similar technologies on <strong>share.rumnnlg.com</strong>.</p>
+        <p>This policy explains how Tranzo uses cookies and similar technologies on <strong>{{ siteUrl | replace("https://", "") }}</strong>.</p>
 
         <h2>What Are Cookies?</h2>
         <p>Cookies are small text files stored in your browser when you visit a website. They help websites remember your preferences and track usage patterns.</p>

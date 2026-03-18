@@ -71,7 +71,9 @@ function detectPathType(stats) {
 
   if (pathType === "turn") {
     const relayUrl = local?.url || remote?.url || "";
-    window._activeTurnServer = (relayUrl.includes("share.rumnnlg.com") || relayUrl.includes("128.199.28.210"))
+    // _turnHosts loaded dynamically from /api/site-config (see base.njk <script>)
+    const _knownHosts = (window._siteConfig?.turnHosts || []).concat(["128.199.28.210"]);
+    window._activeTurnServer = _knownHosts.some(h => relayUrl.includes(h))
       ? "digitalocean"
       : "metered";
   }

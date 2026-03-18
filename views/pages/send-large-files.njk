@@ -2,9 +2,9 @@
 
 {% block title %}Send Large Files Free – No Size Limit P2P Transfer | Tranzo{% endblock %}
 {% block metaDesc %}Send large files of any size for free using Tranzo's WebRTC peer-to-peer transfer. No upload limit, no cloud storage, no signup required.{% endblock %}
-{% block canonical %}<link rel="canonical" href="https://share.rumnnlg.com/send-large-files" />{% endblock %}
+{% block canonical %}<link rel="canonical" href="{{ siteUrl }}/send-large-files" />{% endblock %}
 {% block ogTitle %}Send Large Files Free – No Size Limit | Tranzo{% endblock %}
-{% block ogUrl %}https://share.rumnnlg.com/send-large-files{% endblock %}
+{% block ogUrl %}{{ siteUrl }}/send-large-files{% endblock %}
 
 {% block adTop %}
 <div class="container-lg pt-3">
@@ -118,7 +118,7 @@
 
         <h2>Step-by-Step: Send a Large File</h2>
         <ol>
-          <li>Go to <a href="/">share.rumnnlg.com</a> on the sender's device</li>
+          <li>Go to <a href="/">{{ siteUrl | replace("https://", "") }}</a> on the sender's device</li>
           <li>Enter a device name and click <strong>Create</strong> to create a room</li>
           <li>Share the room link or QR code with the receiver</li>
           <li>Once the receiver joins, drop your large file into the drop zone</li>

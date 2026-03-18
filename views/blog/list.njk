@@ -1,0 +1,176 @@
+{% extends "layouts/base.njk" %}
+
+{% block title %}{{ metaTitle }}{% endblock %}
+{% block metaDesc %}{{ metaDescription }}{% endblock %}
+
+{% block canonical %}
+  <link rel="canonical" href="{{ canonicalUrl }}" />
+  {% if paginationLinks.prev %}<link rel="prev" href="{{ paginationLinks.prev }}" />{% endif %}
+  {% if paginationLinks.next %}<link rel="next" href="{{ paginationLinks.next }}" />{% endif %}
+{% endblock %}
+
+{% block head %}
+  <meta property="og:type"        content="website" />
+  <meta property="og:title"       content="{{ ogTitle }}" />
+  <meta property="og:description" content="{{ ogDescription }}" />
+  <meta property="og:url"         content="{{ canonicalUrl }}" />
+  {% if ogImage %}<meta property="og:image" content="{{ ogImage }}" />{% endif %}
+  <meta name="twitter:card"        content="summary_large_image" />
+  <meta name="twitter:title"       content="{{ ogTitle }}" />
+  <meta name="twitter:description" content="{{ ogDescription }}" />
+  {{ schemaScripts | safe }}
+
+  <style>
+    /* ── Blog list page ────────────────────────────── */
+    .bl-hero { background:linear-gradient(135deg,rgba(5,150,105,.06) 0%,rgba(217,119,6,.04) 100%); border-bottom:1px solid var(--border); padding:clamp(36px,6vw,72px) 20px clamp(28px,4vw,52px); text-align:center; }
+    .bl-hero h1 { font-family:'Bricolage Grotesque',sans-serif; font-size:clamp(26px,5vw,44px); font-weight:800; letter-spacing:-.03em; margin-bottom:12px; }
+    .bl-hero p  { font-size:clamp(14px,2.5vw,17px); color:var(--muted); max-width:540px; margin:0 auto 22px; }
+    .cat-pills  { display:flex; flex-wrap:wrap; justify-content:center; gap:7px; }
+    .cat-pill   { display:inline-block; padding:5px 14px; border-radius:999px; font-size:12px; font-weight:700; text-decoration:none; border:1px solid var(--border); background:#fff; color:var(--muted); transition:all .18s; }
+    .cat-pill:hover,.cat-pill.active { background:var(--em); color:#fff; border-color:var(--em); }
+
+    .bc-bar  { max-width:1100px; margin:0 auto; padding:14px 20px 0; }
+    .bc-list { display:flex; align-items:center; flex-wrap:wrap; gap:0; list-style:none; padding:0; margin:0; font-size:12px; color:var(--muted2); }
+    .bc-item { display:flex; align-items:center; }
+    .bc-link { color:var(--muted); text-decoration:none; } .bc-link:hover { color:var(--em); }
+    .bc-sep  { margin:0 6px; opacity:.4; }
+
+    .bl-main { max-width:1100px; margin:0 auto; padding:36px 20px 64px; display:grid; grid-template-columns:240px 1fr; gap:40px; align-items:start; }
+    @media(max-width:768px){ .bl-main { grid-template-columns:1fr; } .bl-sidebar { display:none; } }
+
+    .bl-sidebar { position:sticky; top:80px; }
+    .sidebar-box { background:var(--surface); border:1px solid var(--border); border-radius:var(--r); padding:18px; margin-bottom:18px; }
+    .sidebar-label { font-family:'Space Grotesk',sans-serif; font-size:10px; font-weight:700; letter-spacing:.8px; text-transform:uppercase; color:var(--muted2); margin-bottom:12px; }
+    .sidebar-cat-list { list-style:none; padding:0; margin:0; }
+    .sidebar-cat-list li { margin-bottom:5px; }
+    .sidebar-cat-list a { display:flex; justify-content:space-between; align-items:center; font-size:13px; color:var(--muted); text-decoration:none; padding:3px 0; }
+    .sidebar-cat-list a:hover,.sidebar-cat-list a.active { color:var(--em); }
+    .sidebar-cat-count { font-size:11px; font-weight:700; background:var(--surfaceHi); color:var(--muted2); padding:1px 7px; border-radius:999px; }
+
+    .posts-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:22px; }
+
+    .post-card { background:#fff; border:1px solid var(--border); border-radius:var(--r); overflow:hidden; box-shadow:var(--shadow-sm); transition:box-shadow .2s,transform .2s; display:flex; flex-direction:column; }
+    .post-card:hover { box-shadow:var(--shadow-md); transform:translateY(-2px); }
+    .post-card-img-link { display:block; }
+    .post-card-img-wrap { height:180px; overflow:hidden; }
+    .post-card-no-img { display:flex; align-items:center; justify-content:center; background:var(--surfaceHi); }
+    .post-card-img { width:100%; height:100%; object-fit:cover; transition:transform .35s; }
+    .post-card:hover .post-card-img { transform:scale(1.03); }
+    .post-card-body { padding:16px 16px 14px; flex:1; display:flex; flex-direction:column; }
+    .post-card-cat { display:inline-block; font-size:10px; font-weight:700; letter-spacing:.7px; text-transform:uppercase; color:var(--emDark); text-decoration:none; margin-bottom:7px; } .post-card-cat:hover { color:var(--em); }
+    .post-card-title { font-family:'Bricolage Grotesque',sans-serif; font-size:15px; font-weight:700; line-height:1.35; margin-bottom:7px; } .post-card-title a { color:var(--text); text-decoration:none; } .post-card-title a:hover { color:var(--em); }
+    .post-card-desc { font-size:12.5px; color:var(--muted); line-height:1.6; flex:1; margin-bottom:12px; }
+    .post-card-footer { display:flex; align-items:center; gap:5px; flex-wrap:wrap; font-size:11px; color:var(--muted2); margin-top:auto; }
+    .post-card-author { display:flex; align-items:center; gap:5px; color:var(--muted); text-decoration:none; } .post-card-author:hover { color:var(--em); }
+    .post-card-avatar { border-radius:50%; object-fit:cover; }
+    .post-card-avatar-init { width:22px; height:22px; border-radius:50%; background:var(--emLight); color:var(--emDark); font-size:10px; font-weight:800; display:inline-flex; align-items:center; justify-content:center; }
+    .post-card-sep { opacity:.35; }
+
+    .pagination { display:flex; justify-content:center; align-items:center; gap:6px; margin-top:36px; flex-wrap:wrap; }
+    .pg-btn { display:inline-flex; align-items:center; justify-content:center; min-width:36px; height:36px; padding:0 10px; border-radius:var(--rSm); border:1px solid var(--border); background:#fff; color:var(--muted); font-size:13px; font-weight:600; text-decoration:none; transition:all .18s; }
+    .pg-btn:hover { border-color:var(--em); color:var(--em); }
+    .pg-btn.active { background:var(--em); color:#fff; border-color:var(--em); pointer-events:none; }
+    .pg-btn.disabled { opacity:.35; pointer-events:none; }
+
+    .empty-state { text-align:center; padding:60px 20px; color:var(--muted); grid-column:1/-1; }
+  </style>
+{% endblock %}
+
+{% block content %}
+
+  {# Hero #}
+  <header class="bl-hero">
+    <h1>{% if currentCategory %}{{ currentCategory }}{% else %}Tranzo Blog{% endif %}</h1>
+    <p>{% if currentCategory %}All articles in <strong>{{ currentCategory }}</strong>{% else %}Tips, guides and deep-dives on P2P file transfer, WebRTC, and privacy.{% endif %}</p>
+
+    {% if categories and categories.length %}
+      <nav class="cat-pills" aria-label="Filter by category">
+        <a href="/blog" class="cat-pill{% if not currentCategory %} active{% endif %}">All</a>
+        {% for cat in categories %}
+          <a href="/blog/category/{{ cat.name | lower | replace(' ','-') }}"
+             class="cat-pill{% if currentCategory == cat.name %} active{% endif %}">
+            {{ cat.name }} <span style="opacity:.55;font-weight:500;margin-left:3px">({{ cat.count }})</span>
+          </a>
+        {% endfor %}
+      </nav>
+    {% endif %}
+  </header>
+
+  {# Breadcrumbs #}
+  {% include "blog/components/breadcrumbs.njk" %}
+
+  {# Main layout #}
+  <div class="bl-main">
+
+    {# Sidebar #}
+    <aside class="bl-sidebar">
+      {% if categories and categories.length %}
+        <div class="sidebar-box">
+          <div class="sidebar-label">Categories</div>
+          <ul class="sidebar-cat-list">
+            <li><a href="/blog"{% if not currentCategory %} class="active"{% endif %}>All Posts</a></li>
+            {% for cat in categories %}
+              <li>
+                <a href="/blog/category/{{ cat.name | lower | replace(' ','-') }}"
+                   {% if currentCategory == cat.name %}class="active"{% endif %}>
+                  {{ cat.name }}<span class="sidebar-cat-count">{{ cat.count }}</span>
+                </a>
+              </li>
+            {% endfor %}
+          </ul>
+        </div>
+      {% endif %}
+      <div class="sidebar-box">
+        <div class="sidebar-label">Quick Tools</div>
+        <p style="font-size:13px;color:var(--muted);margin-bottom:10px">Transfer files instantly — no signup, no cloud.</p>
+        <a href="/" style="display:block;text-align:center;padding:9px 0;background:var(--em);color:#fff;border-radius:var(--rSm);font-size:13px;font-weight:700;text-decoration:none;">⚡ Start Transferring</a>
+      </div>
+    </aside>
+
+    {# Posts #}
+    <div>
+      {% if posts and posts.length %}
+        <div class="posts-grid">
+          {% for post in posts %}
+            {% include "blog/components/post-card.njk" %}
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="empty-state">
+          <p>No posts found{% if currentCategory %} in <strong>{{ currentCategory }}</strong>{% endif %}.</p>
+          <a href="/blog" style="color:var(--em)">← Back to all posts</a>
+        </div>
+      {% endif %}
+
+      {# Pagination #}
+      {% if pagination.pageCount > 1 %}
+        <nav class="pagination" aria-label="Pages">
+          {% if paginationLinks.prev %}
+            <a href="{{ paginationLinks.prev }}" class="pg-btn" rel="prev">← Prev</a>
+          {% else %}
+            <span class="pg-btn disabled">← Prev</span>
+          {% endif %}
+
+          {% for p in paginationLinks.pages %}
+            {% if p.current %}
+              <span class="pg-btn active" aria-current="page">{{ p.n }}</span>
+            {% elif p.n >= currentPage - 2 and p.n <= currentPage + 2 %}
+              <a href="{{ p.url }}" class="pg-btn">{{ p.n }}</a>
+            {% elif p.n == 1 or p.n == pagination.pageCount %}
+              <a href="{{ p.url }}" class="pg-btn">{{ p.n }}</a>
+            {% elif p.n == currentPage - 3 or p.n == currentPage + 3 %}
+              <span class="pg-btn disabled" aria-hidden="true">…</span>
+            {% endif %}
+          {% endfor %}
+
+          {% if paginationLinks.next %}
+            <a href="{{ paginationLinks.next }}" class="pg-btn" rel="next">Next →</a>
+          {% else %}
+            <span class="pg-btn disabled">Next →</span>
+          {% endif %}
+        </nav>
+      {% endif %}
+    </div>
+
+  </div>
+{% endblock %}

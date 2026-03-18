@@ -1,0 +1,188 @@
+{% extends "layouts/base.njk" %}
+
+{% block title %}{{ metaTitle }}{% endblock %}
+{% block metaDesc %}{{ metaDescription }}{% endblock %}
+
+{% block canonical %}
+  <link rel="canonical" href="{{ canonicalUrl }}" />
+  {% if paginationLinks.prev %}<link rel="prev" href="{{ paginationLinks.prev }}" />{% endif %}
+  {% if paginationLinks.next %}<link rel="next" href="{{ paginationLinks.next }}" />{% endif %}
+{% endblock %}
+
+{% block head %}
+  <meta property="og:type"        content="profile" />
+  <meta property="og:title"       content="{{ ogTitle }}" />
+  <meta property="og:description" content="{{ ogDescription }}" />
+  <meta property="og:url"         content="{{ canonicalUrl }}" />
+  {% if ogImage %}<meta property="og:image" content="{{ ogImage }}" />{% endif %}
+  <meta name="twitter:card"        content="summary" />
+  <meta name="twitter:title"       content="{{ ogTitle }}" />
+  <meta name="twitter:description" content="{{ ogDescription }}" />
+  {% if ogImage %}<meta name="twitter:image" content="{{ ogImage }}" />{% endif %}
+  {{ schemaScripts | safe }}
+
+  <style>
+    /* ── Author page ──────────────────────────────────── */
+    .bc-bar  { max-width:1100px; margin:0 auto; padding:14px 20px 0; }
+    .bc-list { display:flex; align-items:center; flex-wrap:wrap; gap:0; list-style:none; padding:0; margin:0; font-size:12px; color:var(--muted2); }
+    .bc-item { display:flex; align-items:center; }
+    .bc-link { color:var(--muted); text-decoration:none; } .bc-link:hover { color:var(--em); }
+    .bc-sep  { margin:0 6px; opacity:.4; }
+
+    .author-hero { background:linear-gradient(135deg,rgba(5,150,105,.06) 0%,rgba(217,119,6,.04) 100%); border-bottom:1px solid var(--border); padding:clamp(40px,6vw,72px) 20px clamp(32px,5vw,56px); }
+    .author-hero-inner { max-width:760px; margin:0 auto; display:flex; gap:28px; align-items:flex-start; flex-wrap:wrap; }
+    .author-hero-avatar { width:96px; height:96px; border-radius:50%; object-fit:cover; flex-shrink:0; border:4px solid var(--borderEm); box-shadow:0 0 0 6px var(--emLight); }
+    .author-hero-avatar--init { display:flex; align-items:center; justify-content:center; background:var(--emLight); color:var(--emDark); font-weight:800; font-size:36px; }
+    .author-hero-meta { flex:1; min-width:200px; }
+    .author-hero-role { font-family:'Space Grotesk',sans-serif; font-size:11px; font-weight:700; letter-spacing:.8px; text-transform:uppercase; color:var(--emDark); margin-bottom:8px; }
+    .author-hero-name { font-family:'Bricolage Grotesque',sans-serif; font-size:clamp(26px,5vw,40px); font-weight:800; letter-spacing:-.03em; margin-bottom:12px; }
+    .author-hero-bio  { font-size:15px; color:var(--muted); line-height:1.7; margin-bottom:14px; max-width:580px; }
+    .author-hero-links { display:flex; gap:10px; flex-wrap:wrap; }
+    .author-social-btn { display:inline-flex; align-items:center; gap:7px; padding:7px 14px; border-radius:var(--rSm); border:1px solid var(--border); background:#fff; color:var(--muted); font-size:12px; font-weight:600; text-decoration:none; transition:all .18s; }
+    .author-social-btn:hover { border-color:var(--em); color:var(--em); }
+    .author-post-count { font-size:12px; color:var(--muted2); margin-top:10px; }
+
+    .author-main { max-width:1100px; margin:0 auto; padding:36px 20px 64px; }
+    .author-posts-heading { font-family:'Bricolage Grotesque',sans-serif; font-size:22px; font-weight:800; margin-bottom:24px; color:var(--text); }
+
+    /* Post card (same as list.njk) */
+    .posts-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:22px; }
+    .post-card { background:#fff; border:1px solid var(--border); border-radius:var(--r); overflow:hidden; box-shadow:var(--shadow-sm); transition:box-shadow .2s,transform .2s; display:flex; flex-direction:column; }
+    .post-card:hover { box-shadow:var(--shadow-md); transform:translateY(-2px); }
+    .post-card-img-link { display:block; }
+    .post-card-img-wrap { height:180px; overflow:hidden; }
+    .post-card-no-img { display:flex; align-items:center; justify-content:center; background:var(--surfaceHi); }
+    .post-card-img { width:100%; height:100%; object-fit:cover; transition:transform .35s; }
+    .post-card:hover .post-card-img { transform:scale(1.03); }
+    .post-card-body { padding:16px 16px 14px; flex:1; display:flex; flex-direction:column; }
+    .post-card-cat { display:inline-block; font-size:10px; font-weight:700; letter-spacing:.7px; text-transform:uppercase; color:var(--emDark); text-decoration:none; margin-bottom:7px; } .post-card-cat:hover { color:var(--em); }
+    .post-card-title { font-family:'Bricolage Grotesque',sans-serif; font-size:15px; font-weight:700; line-height:1.35; margin-bottom:7px; } .post-card-title a { color:var(--text); text-decoration:none; } .post-card-title a:hover { color:var(--em); }
+    .post-card-desc { font-size:12.5px; color:var(--muted); line-height:1.6; flex:1; margin-bottom:12px; }
+    .post-card-footer { display:flex; align-items:center; gap:5px; flex-wrap:wrap; font-size:11px; color:var(--muted2); margin-top:auto; }
+    .post-card-author { display:flex; align-items:center; gap:5px; color:var(--muted); text-decoration:none; } .post-card-author:hover { color:var(--em); }
+    .post-card-avatar { border-radius:50%; object-fit:cover; }
+    .post-card-avatar-init { width:22px; height:22px; border-radius:50%; background:var(--emLight); color:var(--emDark); font-size:10px; font-weight:800; display:inline-flex; align-items:center; justify-content:center; }
+    .post-card-sep { opacity:.35; }
+
+    .pagination { display:flex; justify-content:center; align-items:center; gap:6px; margin-top:36px; flex-wrap:wrap; }
+    .pg-btn { display:inline-flex; align-items:center; justify-content:center; min-width:36px; height:36px; padding:0 10px; border-radius:var(--rSm); border:1px solid var(--border); background:#fff; color:var(--muted); font-size:13px; font-weight:600; text-decoration:none; transition:all .18s; }
+    .pg-btn:hover { border-color:var(--em); color:var(--em); }
+    .pg-btn.active { background:var(--em); color:#fff; border-color:var(--em); pointer-events:none; }
+    .pg-btn.disabled { opacity:.35; pointer-events:none; }
+
+    .empty-state { text-align:center; padding:60px 20px; color:var(--muted); }
+  </style>
+{% endblock %}
+
+{% block content %}
+
+  {# Breadcrumbs #}
+  {% include "blog/components/breadcrumbs.njk" %}
+
+  {# Author hero #}
+  <header class="author-hero">
+    <div class="author-hero-inner"
+         itemscope itemtype="https://schema.org/Person">
+
+      {% if author.avatar %}
+        <img src="{{ author.avatar }}" alt="{{ author.name }}"
+             class="author-hero-avatar" width="96" height="96"
+             loading="eager" fetchpriority="high" itemprop="image" />
+      {% else %}
+        <div class="author-hero-avatar author-hero-avatar--init" aria-hidden="true">
+          {{ author.name[0] | upper }}
+        </div>
+      {% endif %}
+
+      <div class="author-hero-meta">
+        {% if author.role %}
+          <div class="author-hero-role" itemprop="jobTitle">{{ author.role }}</div>
+        {% endif %}
+
+        <h1 class="author-hero-name" itemprop="name">{{ author.name }}</h1>
+
+        {% if author.bio %}
+          <p class="author-hero-bio" itemprop="description">{{ author.bio }}</p>
+        {% endif %}
+
+        <div class="author-hero-links">
+          {% if author.twitter %}
+            <a href="{{ author.twitter }}" rel="noopener noreferrer" target="_blank"
+               class="author-social-btn" itemprop="sameAs" aria-label="Twitter profile">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-4.714-6.231-5.401 6.231H2.736l7.738-8.85L1.254 2.25H8.08l4.253 5.622L18.244 2.25zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
+              </svg>
+              Twitter / X
+            </a>
+          {% endif %}
+          {% if author.linkedin %}
+            <a href="{{ author.linkedin }}" rel="noopener noreferrer" target="_blank"
+               class="author-social-btn" itemprop="sameAs" aria-label="LinkedIn profile">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 01-2.063-2.065 2.064 2.064 0 112.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/>
+              </svg>
+              LinkedIn
+            </a>
+          {% endif %}
+        </div>
+
+        {% if pagination.total %}
+          <p class="author-post-count">
+            {{ pagination.total }} article{% if pagination.total != 1 %}s{% endif %} published
+          </p>
+        {% endif %}
+      </div>
+
+    </div>
+  </header>
+
+  {# Posts grid #}
+  <main class="author-main">
+    <h2 class="author-posts-heading">
+      Articles by {{ author.name }}
+    </h2>
+
+    {% if posts and posts.length %}
+      <div class="posts-grid">
+        {% for post in posts %}
+          {% include "blog/components/post-card.njk" %}
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="empty-state">
+        <p>No published articles yet.</p>
+        <a href="/blog" style="color:var(--em)">← Back to all posts</a>
+      </div>
+    {% endif %}
+
+    {# Pagination #}
+    {% if pagination.pageCount > 1 %}
+      <nav class="pagination" aria-label="Pages">
+        {% if paginationLinks.prev %}
+          <a href="{{ paginationLinks.prev }}" class="pg-btn" rel="prev">← Prev</a>
+        {% else %}
+          <span class="pg-btn disabled">← Prev</span>
+        {% endif %}
+
+        {% for p in paginationLinks.pages %}
+          {% if p.current %}
+            <span class="pg-btn active" aria-current="page">{{ p.n }}</span>
+          {% elif p.n >= currentPage - 2 and p.n <= currentPage + 2 %}
+            <a href="{{ p.url }}" class="pg-btn">{{ p.n }}</a>
+          {% elif p.n == 1 or p.n == pagination.pageCount %}
+            <a href="{{ p.url }}" class="pg-btn">{{ p.n }}</a>
+          {% elif p.n == currentPage - 3 or p.n == currentPage + 3 %}
+            <span class="pg-btn disabled" aria-hidden="true">…</span>
+          {% endif %}
+        {% endfor %}
+
+        {% if paginationLinks.next %}
+          <a href="{{ paginationLinks.next }}" class="pg-btn" rel="next">Next →</a>
+        {% else %}
+          <span class="pg-btn disabled">Next →</span>
+        {% endif %}
+      </nav>
+    {% endif %}
+  </main>
+
+{% endblock %}

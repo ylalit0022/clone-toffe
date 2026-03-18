@@ -2,8 +2,8 @@
 
 {% block title %}Privacy Policy – Tranzo{% endblock %}
 {% block metaDesc %}Tranzo's privacy policy. We don't store your files, don't log personal data, and don't sell information to third parties.{% endblock %}
-{% block canonical %}<link rel="canonical" href="https://share.rumnnlg.com/privacy" />{% endblock %}
-{% block ogUrl %}https://share.rumnnlg.com/privacy{% endblock %}
+{% block canonical %}<link rel="canonical" href="{{ siteUrl }}/privacy" />{% endblock %}
+{% block ogUrl %}{{ siteUrl }}/privacy{% endblock %}
 
 {% block content %}
 <main class="content-page">
@@ -13,7 +13,7 @@
         <div class="page-eyebrow">&#128274; Legal</div>
         <h1>Privacy <span class="grad">Policy</span></h1>
         <p class="lead">Last updated: <strong>January 2025</strong></p>
-        <p>Tranzo ("we", "us", "our") operates the website at <strong>share.rumnnlg.com</strong>. This policy explains what information we collect and how we use it.</p>
+        <p>Tranzo ("we", "us", "our") operates the website at <strong>{{ siteUrl | replace("https://", "") }}</strong>. This policy explains what information we collect and how we use it.</p>
 
         <h2>1. Information We Do NOT Collect</h2>
         <ul>

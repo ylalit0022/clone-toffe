@@ -21,7 +21,11 @@ const path      = require("path");
 const os        = require("os");
 const nunjucks  = require("nunjucks");
 const cookieParser = require("cookie-parser");
-const { sitemapHandler } = require("./sitemap");
+const { sitemapHandler, staticSitemapHandler } = require("./sitemap");
+const blogRoutes             = require("./routes/blog");
+const { blogSitemapHandler } = require("./utils/blog/blogSitemap");
+const adminRoutes            = require("./routes/admin");
+const { pageCacheMiddleware } = require("./middleware/pageCache");
 
 // ── MongoDB ───────────────────────────────────────────────────
 const { connectDB } = require("./db/mongodb");
@@ -34,6 +38,7 @@ const { optionalAuth } = require("./middleware/authMiddleware");
 
 // ── [SECURITY] WebRTC signaling protection ────────────────────
 const security = require("./middleware/security");
+
 
 const app    = express();
 const server = http.createServer(app);
@@ -53,7 +58,8 @@ const io     = new Server(server, {
   },
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT     = process.env.PORT     || 3000;
+const SITE_URL  = (process.env.SITE_URL || 'https://share.rumnnlg.com').replace(/\/$/, '');
 
 // ── Nunjucks template engine ──────────────────────────────────
 // FIX: use path.join(__dirname, ...) so this works regardless
@@ -71,6 +77,9 @@ app.set("view engine", "njk");
 // intercepts requests for files that actually exist in public/.
 // index.html is intentionally absent so the nunjucks "/" wins.
 app.use(express.static(path.join(__dirname, "public")));
+
+// HTML page cache
+app.use(pageCacheMiddleware);
 
 
 // ── Body parsers + cookie parser ─────────────────────────────
@@ -91,13 +100,15 @@ app.get("/logout", (req, res) => res.redirect("/auth/logout"));
 // Must be registered AFTER cookie-parser and BEFORE page routes.
 app.use(optionalAuth, (req, res, next) => {
   res.locals.currentUser = req.user || null;
+  // Inject siteUrl into every Nunjucks template automatically.
+  // Change SITE_URL in .env — no template edits needed.
+  res.locals.siteUrl = SITE_URL;
   next();
 });
 
-// ── Sitemap ───────────────────────────────────────────────────
-// Dynamic XML sitemap — auto-updates when sitemap.js ROUTES change.
-// To add a new page: edit sitemap.js ROUTES array, no server restart needed.
-app.get("/sitemap.xml", sitemapHandler);
+app.get("/sitemap.xml",        sitemapHandler);
+app.get("/sitemap-static.xml", staticSitemapHandler);
+app.get("/blog-sitemap.xml",   blogSitemapHandler);
 
 // ── robots.txt ───────────────────────────────────────────────
 app.get("/robots.txt", (req, res) => {
@@ -107,7 +118,8 @@ app.get("/robots.txt", (req, res) => {
     "Allow: /",
     "Disallow: /api/",
     "",
-    "Sitemap: https://share.rumnnlg.com/sitemap.xml",
+    `Sitemap: ${SITE_URL}/sitemap.xml`,
+    `Sitemap: ${SITE_URL}/blog-sitemap.xml`,
   ].join("\n"));
 });
 
@@ -157,6 +169,17 @@ app.get("/api/ice-config", (req, res) => {
   res.json({ iceServers });
 });
 
+// ── /api/site-config — exposes SITE_URL to browser JS ───────
+// Allows ice.js / script.js to read the active domain without
+// hardcoding. Cached 24h (changes only on redeploy).
+app.get("/api/site-config", (req, res) => {
+  res.setHeader("Cache-Control", "public, max-age=86400");
+  res.json({
+    siteUrl:   SITE_URL,
+    turnHosts: [process.env.INDIA_TURN_HOST || ""].filter(Boolean),
+  });
+});
+
 // ════════════════════════════════════════════════════════════════
 //  PAGE ROUTES
 //
@@ -194,10 +217,20 @@ app.get("/terms",      (req, res) => res.render("pages/terms.njk"));
 app.get("/cookies",    (req, res) => res.render("pages/cookies.njk"));
 app.get("/disclaimer", (req, res) => res.render("pages/disclaimer.njk"));
 
-// ── 404 — MUST be the LAST route ─────────────────────────────
-// Any URL that doesn't match a route above lands here.
-// Responds with HTTP 404 status so Google Search Console
-// correctly marks these as "Not found" and does not index them.
+app.use("/blog",  blogRoutes);
+app.use("/admin", adminRoutes);
+
+app.post("/api/blog/cache-purge", async (req, res) => {
+  const { secret, key } = req.body || {};
+  if (secret !== (process.env.CACHE_PURGE_SECRET || "change-me"))
+    return res.status(403).json({ error: "Forbidden" });
+  try {
+    const { purgeCache } = require("./utils/blog/ghost");
+    const deleted = await purgeCache(key || null);
+    res.json({ ok: true, deleted });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.use((req, res) => {
   res.status(404).render("pages/404.njk");
 });
@@ -450,9 +483,15 @@ io.on("connection", (socket) => {
   });
 
   // ── CHAT ──────────────────────────────────────────────────
-  socket.on("chat-msg", ({ text }) => {
+  socket.on("chat-msg", ({ text, msgId }) => {
     if (!currentRoom || !text) return;
-    io.to(currentRoom).emit("chat-msg", { from: socket.id, name: deviceName, text });
+    io.to(currentRoom).emit("chat-msg", { from: socket.id, name: deviceName, text, msgId });
+  });
+
+  // Delivery/read receipt — route back to original sender only
+  socket.on("chat-ack", ({ to, msgId, status }) => {
+    if (!to || !msgId) return;
+    io.to(to).emit("chat-ack", { msgId, status });
   });
 
   // ── TYPING INDICATORS ─────────────────────────────────────

@@ -240,7 +240,8 @@ async function detectAndApplyNetworkProfile(pcRef) {
         stats.forEach(r => {
           if (r.type === "local-candidate" && r.candidateType === "relay") {
             const url = r.url || r.relatedAddress || "";
-            if (url.includes("share.rumnnlg.com") || url.includes("128.199.28.210")) {
+            const _knownTurnHosts = (window._siteConfig?.turnHosts || []).concat(["128.199.28.210"]);
+            if (_knownTurnHosts.some(h => url.includes(h))) {
               window._activeTurnServer = "digitalocean";
             } else {
               window._activeTurnServer = "metered";
@@ -533,24 +534,21 @@ const rejectBtn     = document.getElementById("rejectBtn");
 // Drag & drop
 setTimeout(() => { try { enableDragDrop(); } catch {} }, 0);
 
-// ─── QUEUE / HISTORY ─────────────────────────────────────────
-// sentHistory and recvHistory are persisted to localStorage so they
-// survive page reloads. We keep the last 50 entries per list.
-const HISTORY_KEY_SENT = "tranzo:sentHistory";
-const HISTORY_KEY_RECV = "tranzo:recvHistory";
-const HISTORY_MAX      = 50;
+// ─── QUEUE / HISTORY — SESSION ONLY ──────────────────────────
+// History is stored IN-MEMORY only. Tab/browser close = clean slate.
+// NO localStorage persistence — privacy by design.
+// Remove any stale keys from older builds:
+try { localStorage.removeItem("tranzo:sentHistory"); } catch {}
+try { localStorage.removeItem("tranzo:recvHistory"); } catch {}
 
-function _loadHistory(key) {
-  try { return JSON.parse(localStorage.getItem(key) || "[]"); } catch { return []; }
-}
-function _saveHistory(key, arr) {
-  try { localStorage.setItem(key, JSON.stringify(arr.slice(-HISTORY_MAX))); } catch {}
-}
+const HISTORY_MAX = 50;
+function _loadHistory()  { return []; }   // always empty — session only
+function _saveHistory()  { /* no-op — in-memory only */ }
 
 let queueWrap = null, queueListEl = null, queueCountEl = null;
 let recvQueueWrap = null, recvQueueListEl = null, recvQueueCountEl = null;
-const sentHistory = _loadHistory(HISTORY_KEY_SENT);
-const recvHistory = _loadHistory(HISTORY_KEY_RECV);
+const sentHistory = [];   // clears when tab closes
+const recvHistory = [];   // clears when tab closes
 let autoAcceptThisRoom = false;
 
 function autoAcceptKey() { return `autoAccept:${currentRoom || ""}`; }
@@ -564,7 +562,7 @@ function upsertSentItem(id, name, size, state, done = 0, total = size || 0) {
   it.name = name; it.size = size; it.state = state;
   it.done = Math.max(it.done || 0, done || 0);
   it.total = total || it.total || size || 0;
-  _saveHistory(HISTORY_KEY_SENT, sentHistory);
+  // session-only — no persistence
   return it;
 }
 function upsertRecvItem(id, name, size, state, done = 0, total = size || 0) {
@@ -574,7 +572,7 @@ function upsertRecvItem(id, name, size, state, done = 0, total = size || 0) {
   it.name = name; it.size = size; it.state = state;
   it.done = Math.max(it.done || 0, done || 0);
   it.total = total || it.total || size || 0;
-  _saveHistory(HISTORY_KEY_RECV, recvHistory);
+  // session-only — no persistence
   return it;
 }
 
@@ -804,11 +802,14 @@ function _hideExtractionModal() {
 
 function resetTransferUI() {
   progressBar.value = 0;
-  if (typeof fileStatus !== "undefined") fileStatus.innerText = ""; // FIX: clear stale ✅ so enhancements.js poll doesn't re-fire toast loop
+  if (typeof fileStatus !== "undefined") fileStatus.innerText = "";
   speedText.innerText = "Speed: 0 MB/s";
   progressText.innerText = "0% (0 B / 0 B)";
   etaText.innerText = "Remaining: --";
   pauseBtn.disabled = true; resumeBtn.disabled = true; cancelBtn.disabled = true;
+  // Always re-enable file picker when UI resets — belt-and-suspenders safety
+  // sendFile() will re-disable if immediately starting another file
+  try { _setFilePickerDisabled(false); } catch(e) {}
 }
 // ── FIX-ALERTS: route status text through TransferAlerts when available ──────
 // TransferAlerts (transfer-alerts.js) must be loaded before script.js in HTML.
@@ -869,9 +870,36 @@ function setProgressBytes(done, total) {
     progressText.innerText = `${Math.min(100, pct)}% (${fmtBytes(_progressDone)} / ${fmtBytes(_progressTotal)})`;
   });
 }
+// ── System / transfer log — SEPARATE from chatBox ────────────────────────────
+// All non-chat messages (file transfer status, connection info, debug) go to
+// #sysLog inside #sysLogWrap. chatBox stays clean — only real chat bubbles.
 function addMsg(html) {
-  const div = document.createElement("div"); div.className = "msg"; div.innerHTML = html;
-  chatBox.appendChild(div); chatBox.scrollTop = chatBox.scrollHeight;
+  try {
+    let log = document.getElementById('sysLog');
+    const wrap = document.getElementById('sysLogWrap');
+    if (!log) {
+      // Fallback: create inline if template didn't render it
+      if (wrap) { wrap.style.display = 'block'; log = document.getElementById('sysLog'); }
+      if (!log) return; // silent drop if no container at all
+    }
+    if (wrap) wrap.style.display = 'block'; // show the log section when first message arrives
+    const div = document.createElement('div');
+    div.style.cssText = 'padding:2px 0;border-bottom:1px solid rgba(0,0,0,.04);';
+    div.innerHTML = html;
+    log.appendChild(div);
+    log.scrollTop = log.scrollHeight;
+  } catch(e) {}
+}
+
+function toggleSysLog() {
+  try {
+    const log    = document.getElementById('sysLog');
+    const icon   = document.getElementById('sysLogToggleIcon');
+    if (!log) return;
+    const hidden = log.style.display === 'none';
+    log.style.display = hidden ? '' : 'none';
+    if (icon) icon.style.transform = hidden ? '' : 'rotate(-90deg)';
+  } catch(e) {}
 }
 
 // ── Toast notification system ─────────────────────────────────────────────────
@@ -993,19 +1021,145 @@ function showCompletionPopup({ title, subtitle, stats, btnText = "Done", fileRow
   `;
   document.head.appendChild(s);
 })()
-function addChatBubble({ user, text, mine }) {
-  const row = document.createElement("div"); row.className = `msgRow ${mine ? "mine" : "other"}`;
-  const bubble = document.createElement("div"); bubble.className = `bubble ${mine ? "mine" : "other"}`;
-  bubble.innerHTML = `<div class="name">${user}</div><div class="text">${text}</div>`;
-  row.appendChild(bubble); chatBox.appendChild(row); chatBox.scrollTop = chatBox.scrollHeight;
+// ── Chat sound (Web Audio API — no external file needed) ─────────────────────
+const _chatAudio = (() => {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    return function playChime(freq = 880, dur = 0.14, vol = 0.12) {
+      try {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain); gain.connect(ctx.destination);
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(freq, ctx.currentTime);
+        gain.gain.setValueAtTime(vol, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + dur);
+        osc.start(ctx.currentTime);
+        osc.stop(ctx.currentTime + dur);
+      } catch(e) {}
+    };
+  } catch(e) { return () => {}; }
+})();
+
+// ── Message status tracker for tick updates ───────────────────────────────────
+const _msgStatusMap = new Map(); // msgId → { tickEl, status }
+let   _msgSeq       = 0;
+
+// ── addChatBubble — WhatsApp-style with ticks + sound ─────────────────────────
+function addChatBubble({ user, text, mine, msgId }) {
+  const id  = msgId || `m${++_msgSeq}`;
+  const row = document.createElement("div");
+  row.className = `msgRow ${mine ? "mine" : "other"}`;
+
+  const bubble = document.createElement("div");
+  bubble.className = `bubble ${mine ? "mine" : "other"}`;
+  bubble.dataset.msgId = id;
+
+  // Tick SVG builder — single (sent), double grey (delivered), double blue (read)
+  const tickSent = `<svg class="msg-tick" data-id="${id}" width="16" height="11" viewBox="0 0 16 11" fill="none"><path d="M1 5.5L5 9.5L15 1" stroke="#b0b8c1" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+
+  bubble.innerHTML = `<div class="bubble-name">${escapeHtml(user)}</div><div class="bubble-text">${escapeHtml(text)}</div>${mine ? `<div class="bubble-meta"><span class="bubble-time">${_fmtTime()}</span>${tickSent}</div>` : `<div class="bubble-meta"><span class="bubble-time">${_fmtTime()}</span></div>`}`;
+
+  row.appendChild(bubble);
+  chatBox.appendChild(row);
+  chatBox.scrollTop = chatBox.scrollHeight;
+
+  if (mine) {
+    const tickEl = bubble.querySelector(`.msg-tick[data-id="${id}"]`);
+    _msgStatusMap.set(id, { tickEl, status: 'sent' });
+  }
+
+  if (!mine) {
+    // Play incoming chime
+    _chatAudio(880, 0.14, 0.10);
+    // Show browser/toast alert if window not focused
+    const tabHidden = document.hidden || !document.hasFocus();
+    if (tabHidden) {
+      const perm = typeof Notification !== 'undefined' ? Notification.permission : 'denied';
+      if (perm === 'granted') {
+        try {
+          const n = new Notification('💬 New message — Tranzo', {
+            body: `${user}: ${text.slice(0, 80)}`,
+            icon: '/favicon.ico',
+            tag:  'tranzo-chat',
+          });
+          n.onclick = () => { window.focus(); n.close(); };
+        } catch(e) {}
+      } else {
+        showToast(`💬 ${escapeHtml(user)}: ${escapeHtml(text.slice(0, 60))}`, 'info', 4500);
+      }
+    }
+    // Also mark sender's last sent message as delivered
+    socket.emit('chat-delivered', { to: null });
+  }
+
+  return id;
 }
 
-// Chat styles
+// Mark message as delivered (double grey tick)
+function _chatMarkDelivered(msgId) {
+  const s = _msgStatusMap.get(msgId); if (!s || s.status !== 'sent') return;
+  s.status = 'delivered';
+  if (s.tickEl) s.tickEl.outerHTML = `<svg class="msg-tick msg-tick-delivered" data-id="${msgId}" width="20" height="11" viewBox="0 0 20 11" fill="none"><path d="M1 5.5L5 9.5L15 1" stroke="#b0b8c1" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M6 5.5L10 9.5L20 1" stroke="#b0b8c1" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  // Update ref after DOM replacement
+  const newEl = chatBox.querySelector(`.msg-tick[data-id="${msgId}"]`);
+  if (newEl) s.tickEl = newEl;
+}
+
+// Mark message as read (double blue tick)
+function _chatMarkRead(msgId) {
+  const s = _msgStatusMap.get(msgId); if (!s || s.status === 'read') return;
+  s.status = 'read';
+  if (s.tickEl) s.tickEl.outerHTML = `<svg class="msg-tick msg-tick-read" data-id="${msgId}" width="20" height="11" viewBox="0 0 20 11" fill="none"><path d="M1 5.5L5 9.5L15 1" stroke="#4FC3F7" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M6 5.5L10 9.5L20 1" stroke="#4FC3F7" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  const newEl = chatBox.querySelector(`.msg-tick[data-id="${msgId}"]`);
+  if (newEl) s.tickEl = newEl;
+}
+
+// Track last sent msgId so we can update it on delivery
+let _lastSentMsgId = null;
+
+function escapeHtml(str) {
+  return String(str || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function _fmtTime() {
+  const d = new Date();
+  return d.getHours().toString().padStart(2,'0') + ':' + d.getMinutes().toString().padStart(2,'0');
+}
+
+// Chat styles — WhatsApp-inspired
 (function() {
   const style = document.createElement("style");
-  style.innerHTML = `#chatBox{padding:10px}.msgRow{display:flex;margin:6px 0}.msgRow.mine{justify-content:flex-end}.msgRow.other{justify-content:flex-start}.bubble{max-width:72%;padding:10px 12px;border-radius:14px;font-size:14px;line-height:1.25;box-shadow:0 6px 14px rgba(0,0,0,.08);word-break:break-word}.bubble.mine{background:rgba(220,248,198,.95)}.bubble.other{background:rgba(255,255,255,.92)}.bubble .name{font-weight:800;font-size:12px;opacity:.75;margin-bottom:4px}.typingLine{font-size:13px;opacity:.75;padding:6px 10px}`;
+  style.textContent = `
+    #chatBox { padding: 10px 12px; display:flex; flex-direction:column; gap:2px; }
+    .msgRow   { display:flex; margin:3px 0; }
+    .msgRow.mine  { justify-content:flex-end; }
+    .msgRow.other { justify-content:flex-start; }
+    .bubble {
+      max-width: 78%;
+      padding: 8px 12px 6px;
+      border-radius: 14px;
+      font-size: 14px; line-height: 1.4;
+      word-break: break-word;
+      box-shadow: 0 1px 3px rgba(0,0,0,.10);
+      position: relative;
+    }
+    .bubble.mine  { background: #dcf8c6; border-radius: 14px 4px 14px 14px; }
+    .bubble.other { background: #ffffff; border-radius: 4px 14px 14px 14px; }
+    .bubble-name  { font-weight: 700; font-size: 11.5px; color: #059669; margin-bottom: 3px; }
+    .bubble.mine .bubble-name { display: none; }
+    .bubble-text  { color: #111; font-size: 14px; line-height: 1.45; }
+    .bubble-meta  {
+      display: flex; align-items: center; justify-content: flex-end;
+      gap: 3px; margin-top: 4px;
+    }
+    .bubble-time  { font-size: 10.5px; color: #8a9bb0; }
+    .msg-tick     { vertical-align: middle; flex-shrink: 0; }
+    .typingLine   { font-size: 13px; opacity:.7; padding: 4px 12px; color: #666; font-style: italic; }
+  `;
   document.head.appendChild(style);
 })();
+
+// (duplicate chat style block removed — see WhatsApp styles above)
 
 // Typing indicator
 const typingLine = document.createElement("div");
@@ -1233,12 +1387,152 @@ socket.on("typing", ({ user }) => { if (user) showTyping(`${user} is typing...`)
 socket.on("stop-typing", () => showTyping(""));
 sendBtn.onclick = () => {
   const msg = messageInput.value.trim(); if (!msg) return;
-  socket.emit("chat-msg", { text: msg });
-  addChatBubble({ user: "You", text: msg, mine: true });
+  const seq = `m${++_msgSeq}`;
+  socket.emit("chat-msg", { text: msg, msgId: seq });
+  _lastSentMsgId = addChatBubble({ user: "You", text: msg, mine: true, msgId: seq });
   messageInput.value = "";
   socket.emit("stop-typing", { roomId: currentRoom, user: getDeviceName() });
 };
-socket.on("chat-msg", data => { if (data.from !== socket.id) addChatBubble({ user: data.name || "Peer", text: data.text || "", mine: false }); });
+// ── Tab visibility + unread badge system (Facebook-style) ────────────────────
+let _unreadCount    = 0;           // messages received while tab is hidden
+let _origTitle      = document.title.replace(/^\(\d+\) 💬 /, ''); // save clean title (strip any old badge)
+let _titleBlinkTimer = null;
+
+function _setUnreadBadge(count) {
+  _unreadCount = count;
+  // Update favicon badge via canvas
+  _drawFaviconBadge(count);
+  // Update tab title like Facebook: "(3) Tranzo | ..."
+  if (count > 0) {
+    document.title = `(${count}) 💬 ${_origTitle}`;
+    // Blink effect for new messages
+    if (!_titleBlinkTimer) {
+      let blink = true;
+      _titleBlinkTimer = setInterval(() => {
+        document.title = blink ? `(${count}) 💬 ${_origTitle}` : _origTitle;
+        blink = !blink;
+      }, 1200);
+    }
+  } else {
+    document.title = _origTitle;
+    if (_titleBlinkTimer) { clearInterval(_titleBlinkTimer); _titleBlinkTimer = null; }
+  }
+}
+
+function _drawFaviconBadge(count) {
+  try {
+    // Get or create favicon link element
+    let link = document.querySelector("link[rel~='icon']");
+    if (!link) {
+      link = document.createElement('link');
+      link.rel = 'icon';
+      document.head.appendChild(link);
+    }
+    if (count <= 0) {
+      // Restore original favicon
+      link.href = '/favicon.ico';
+      return;
+    }
+    // Draw badge on canvas
+    const canvas = document.createElement('canvas');
+    canvas.width = 32; canvas.height = 32;
+    const ctx = canvas.getContext('2d');
+    // Base favicon as image (try to load, fallback to plain circle)
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      ctx.drawImage(img, 0, 0, 32, 32);
+      _paintBadge(ctx, count);
+      link.href = canvas.toDataURL('image/png');
+    };
+    img.onerror = () => {
+      // No favicon — just paint a green base
+      ctx.fillStyle = '#059669';
+      ctx.beginPath(); ctx.arc(16, 16, 16, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 18px sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('T', 16, 16);
+      _paintBadge(ctx, count);
+      link.href = canvas.toDataURL('image/png');
+    };
+    img.src = '/favicon.ico?' + Date.now();
+  } catch(e) {}
+}
+
+function _paintBadge(ctx, count) {
+  const label = count > 99 ? '99+' : String(count);
+  const r = label.length > 1 ? 10 : 8;
+  const x = 32 - r, y = r;
+  ctx.fillStyle = '#e11d48';
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = `bold ${label.length > 2 ? 7 : 9}px sans-serif`;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(label, x, y);
+}
+
+// Clear badge when user comes back to the tab
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) {
+    _setUnreadBadge(0);
+    // Send read receipts for all pending unread messages
+    _flushPendingReadAcks();
+  }
+});
+window.addEventListener('focus', () => {
+  _setUnreadBadge(0);
+  _flushPendingReadAcks();
+});
+
+// Also clear badge when chatBox becomes visible in viewport (user scrolls to it)
+(function _observeChatBox() {
+  if (!chatBox || typeof IntersectionObserver === 'undefined') return;
+  const obs = new IntersectionObserver(entries => {
+    if (entries[0]?.isIntersecting && !document.hidden) {
+      _setUnreadBadge(0);
+      _flushPendingReadAcks();
+    }
+  }, { threshold: 0.5 });
+  obs.observe(chatBox);
+})();
+
+// Queue of (from, msgId) pairs where we owe a "read" ack but tab was hidden
+const _pendingReadAcks = [];
+
+function _flushPendingReadAcks() {
+  while (_pendingReadAcks.length) {
+    const { from, msgId } = _pendingReadAcks.shift();
+    socket.emit('chat-ack', { to: from, msgId, status: 'read' });
+  }
+}
+
+socket.on("chat-msg", data => {
+  if (data.from !== socket.id) {
+    addChatBubble({ user: data.name || "Peer", text: data.text || "", mine: false });
+
+    if (data.msgId) {
+      const tabVisible = !document.hidden && document.hasFocus();
+      if (tabVisible) {
+        // Tab active → send read ack immediately (blue tick)
+        socket.emit("chat-ack", { to: data.from, msgId: data.msgId, status: "read" });
+      } else {
+        // Tab hidden/blurred → only send "delivered" now, queue "read" for later
+        socket.emit("chat-ack", { to: data.from, msgId: data.msgId, status: "delivered" });
+        _pendingReadAcks.push({ from: data.from, msgId: data.msgId });
+        // Increment unread badge
+        _setUnreadBadge(_unreadCount + 1);
+      }
+    }
+  }
+});
+
+// Receiver ack → update sender's tick to delivered/read
+socket.on("chat-ack", ({ msgId, status }) => {
+  if (!msgId) return;
+  if (status === "read")           _chatMarkRead(msgId);
+  else if (status === "delivered") _chatMarkDelivered(msgId);
+});
 
 // ─── DRAG & DROP ──────────────────────────────────────────────────────────────
 function enableDragDrop() {
@@ -1296,6 +1590,104 @@ document.addEventListener("visibilitychange", () => {
     }
   }
 });
+
+
+// ── File picker enable/disable during transfer ────────────────────────────────
+// Inject CSS alert styles once
+(function _injectPickerBlockStyles() {
+  if (document.getElementById('_picker-block-css')) return;
+  const s = document.createElement('style');
+  s.id = '_picker-block-css';
+  s.textContent = `
+    /* Dropzone blocked state */
+    .tranzo-picker-blocked {
+      position: relative;
+      pointer-events: none !important;
+    }
+    .tranzo-picker-blocked::after {
+      content: '⏳ Transfer in progress…';
+      position: absolute;
+      inset: 0;
+      background: rgba(5,150,105,.10);
+      border: 2px dashed rgba(5,150,105,.5);
+      border-radius: inherit;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 14px;
+      color: #047857;
+      z-index: 10;
+      pointer-events: none;
+      backdrop-filter: blur(2px);
+    }
+    /* Shake animation when user tries to interact with blocked picker */
+    @keyframes _pickerShake {
+      0%,100% { transform: translateX(0); }
+      20%      { transform: translateX(-6px); }
+      40%      { transform: translateX(6px); }
+      60%      { transform: translateX(-4px); }
+      80%      { transform: translateX(4px); }
+    }
+    .tranzo-picker-shake {
+      animation: _pickerShake 0.35s ease;
+    }
+  `;
+  document.head.appendChild(s);
+})();
+
+// Show shake + toast when user tries to use picker while blocked
+function _pickerBlockAlert() {
+  const dz = document.getElementById('tui-dropzone') || document.getElementById('dropZone');
+  if (dz) {
+    dz.classList.remove('tranzo-picker-shake');
+    void dz.offsetWidth; // force reflow to restart animation
+    dz.classList.add('tranzo-picker-shake');
+    setTimeout(() => dz.classList.remove('tranzo-picker-shake'), 400);
+  }
+  showToast('⏳ Transfer in progress — wait until it completes', 'warn', 2500);
+}
+
+function _setFilePickerDisabled(disabled) {
+  try {
+    // Real hidden fileInput
+    if (fileInput) {
+      fileInput.disabled = disabled;
+      const lbl = fileInput.closest('label') || fileInput.parentElement?.closest('label');
+      if (lbl) {
+        lbl.style.pointerEvents = disabled ? 'none' : '';
+        lbl.style.cursor = disabled ? 'not-allowed' : '';
+      }
+    }
+    // transfer-ui.js trigger
+    const tuiTrigger = document.getElementById('tui-file-trigger');
+    if (tuiTrigger) tuiTrigger.disabled = disabled;
+
+    // Drop zone — add/remove blocked class for CSS overlay
+    const dz = document.getElementById('tui-dropzone') || document.getElementById('dropZone');
+    if (dz) {
+      if (disabled) {
+        dz.classList.add('tranzo-picker-blocked');
+        // Intercept clicks while blocked — show alert instead
+        dz._blockedClickHandler = (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          _pickerBlockAlert();
+        };
+        dz.addEventListener('click', dz._blockedClickHandler, true);
+        dz.addEventListener('dragover', dz._blockedClickHandler, true);
+      } else {
+        dz.classList.remove('tranzo-picker-blocked');
+        dz.classList.remove('tranzo-picker-shake');
+        if (dz._blockedClickHandler) {
+          dz.removeEventListener('click',    dz._blockedClickHandler, true);
+          dz.removeEventListener('dragover', dz._blockedClickHandler, true);
+          dz._blockedClickHandler = null;
+        }
+      }
+    }
+  } catch(e) {}
+}
 
 function enqueueFilesForSend(files) {
   const arr = Array.from(files || []);
@@ -1927,11 +2319,13 @@ function setupDataChannelFor(socketId, channel, gen) {
           " running=" + sendState.running + " offset=" + sendState.offset);
         transferCompleted = true;
         setStatus(`✅ Sent: ${sendState.file?.name || ""}`);
+        showToast(`✅ File sent: ${sendState.file?.name || ""}`, "success", 5000);
         try { const f = sendState.file; if (f) { upsertSentItem(f._qid || `${f.name}|${f.size}`, f.name, f.size, "done", f.size, f.size); renderQueueUI(null); } } catch {}
         setProgressBytes(sendState.file?.size || 0, sendState.file?.size || 1);
         etaText.innerText = "Remaining: 0m 0s";
         sendState.running = false; outgoingFile = null;
         pauseBtn.disabled = true; resumeBtn.disabled = true; cancelBtn.disabled = true;
+        _setFilePickerDisabled(false); // always re-enable here; sendFile() will re-disable if queue has more
 
         // Track session stats
         if (!_sessionSentStart) _sessionSentStart = performance.now();
@@ -2230,6 +2624,7 @@ function cancelTransfer(reason, notifyPeer, canceledBy) {
     if (notifyPeer) socket.emit("file-cancel", { room: currentRoom, by: canceledBy || getDeviceName(), reason });
   }
   incomingFile = null;
+  _setFilePickerDisabled(false);
   setStatus("❌ Transfer canceled");
   resetTransferUI(); safeCloseAllPeers();
   addMsg(`<span class="muted">❌ ${reason}</span>`);
@@ -2570,6 +2965,7 @@ async function sendFile(file) {
   try { upsertSentItem(file._qid || `${file.name}|${file.size}`, file.name, file.size, "sending", 0, file.size); renderQueueUI(file); } catch {}
 
   pauseBtn.disabled = false; resumeBtn.disabled = true; cancelBtn.disabled = false;
+  _setFilePickerDisabled(true);  // sender: disable file picker during transfer
   // running already set above — just set the rest of state here
   sendState.paused = false; sendState.canceled = false;
   sendState.offset = 0; sendState.file = file; sendState.ackBytes = 0;
@@ -3064,7 +3460,8 @@ async function startReceiver(meta) {
     receivedChunkIndices: new Set(),
   };
 
-  setStatus(`Receiving: ${meta.name} (${fmtBytes(meta.size)})`);
+  _setFilePickerDisabled(true);
+  setStatus(`Receiving: ${meta.name} (${fmtBytes(meta.size)})`);  // receiver side — disable picker
   addMsg(`<b>Receiving:</b> ${meta.name} (${fmtBytes(meta.size)})`);
   dlog("startReceiver", meta);
   try { const id = meta?.id || `${meta?.name}|${meta?.size}`; upsertRecvItem(id, meta.name, meta.size || 0, "receiving", 0, meta.size || 0); renderRecvQueueUI(); } catch {}
@@ -3328,6 +3725,7 @@ async function finalizeIncomingFile() {
             if (err) {
               dlog("[ZIP] Extraction failed:", err);
               _hideExtractionModal();
+              _setFilePickerDisabled(false);
               setStatus(`⚠️ Extraction failed — zip already downloaded above`);
               addMsg(`<span class="muted">⚠️ Could not extract bundle — raw zip was already saved.</span>`);
               try { const id = meta?.id || `${meta?.name}|${meta?.size}`; upsertRecvItem(id, meta.name, meta.size||0, "done", meta.size||0, meta.size||0); renderRecvQueueUI(); } catch {}
@@ -3342,8 +3740,9 @@ async function finalizeIncomingFile() {
             let downloadIndex = 0;
             function downloadNext() {
               if (downloadIndex >= entries.length) {
-                // All done — hide modal, update UI
+                // All done — hide modal, update UI, re-enable file picker
                 _hideExtractionModal();
+                _setFilePickerDisabled(false);  // re-enable after zip extraction complete
                 setStatus(`✅ Extracted ${entries.length} files`);
                 addMsg(`<b>✅ Extracted ${entries.length} files from bundle</b>`);
 
@@ -3394,6 +3793,7 @@ async function finalizeIncomingFile() {
         }).catch(err => {
           dlog("[ZIP] ArrayBuffer conversion failed:", err);
           _hideExtractionModal();
+          _setFilePickerDisabled(false);
           // Raw zip was already downloaded above — just update history
           addMsg(`<span class="muted">⚠️ Extraction error — raw zip was already saved.</span>`);
           try { const id = meta?.id || `${meta?.name}|${meta?.size}`; upsertRecvItem(id, meta.name, meta.size||0, "done", meta.size||0, meta.size||0); renderRecvQueueUI(); } catch {}
@@ -3410,7 +3810,9 @@ async function finalizeIncomingFile() {
           document.body.appendChild(a); a.click(); document.body.removeChild(a);
         } catch(e) { dlog("auto-download click failed:", e); }
 
+        _setFilePickerDisabled(false);
         setStatus(`✅ Received: ${meta.name}`);
+        showToast(`✅ Received: ${meta.name} (${fmtBytes(meta.size)})`, "success", 5000);
         try { const id = meta?.id || `${meta?.name}|${meta?.size}`; upsertRecvItem(id, meta.name, meta.size||0, "done", meta.size||0, meta.size||0); renderRecvQueueUI(); } catch {}
         addMsg(`<b>File received:</b> ${meta.name}`);
         addToDownloadsManager({ name: meta.name, size: meta.size, type: meta.type, savedToDisk: true, url });

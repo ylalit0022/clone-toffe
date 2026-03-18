@@ -1,0 +1,1 @@
+import{ac as e,ab as o,aa as a}from"./index-SBNwbl7r.js";const t="PostsResponseType",r=e({dataType:t,path:"/posts/"}),c=a({dataType:t,path:s=>`/posts/${s}/`}),n=e({dataType:t,path:"/posts/export/"}),u=o({method:"DELETE",path:s=>`/posts/${s}/`});export{u as a,n as b,c as g,r as u};

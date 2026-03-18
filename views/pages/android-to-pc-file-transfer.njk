@@ -2,9 +2,9 @@
 
 {% block title %}Android to PC File Transfer Free – No USB, No App | Tranzo{% endblock %}
 {% block metaDesc %}Transfer files from Android to PC without USB cable, Bluetooth, or any app install. Use Tranzo's free WebRTC browser-based transfer over Wi-Fi or internet.{% endblock %}
-{% block canonical %}<link rel="canonical" href="https://share.rumnnlg.com/android-to-pc-file-transfer" />{% endblock %}
+{% block canonical %}<link rel="canonical" href="{{ siteUrl }}/android-to-pc-file-transfer" />{% endblock %}
 {% block ogTitle %}Android to PC File Transfer Free – No USB | Tranzo{% endblock %}
-{% block ogUrl %}https://share.rumnnlg.com/android-to-pc-file-transfer{% endblock %}
+{% block ogUrl %}{{ siteUrl }}/android-to-pc-file-transfer{% endblock %}
 
 {% block adTop %}
 <div class="container-lg pt-3">
@@ -40,7 +40,7 @@
             <div style="width:32px;height:32px;border-radius:50%;background:var(--em);color:#fff;display:flex;align-items:center;justify-content:center;font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:14px;flex-shrink:0;">1</div>
             <div>
               <h3 style="margin-top:0;">On your PC — Create a Room</h3>
-              <p class="mb-0">Open <a href="/">share.rumnnlg.com</a> in your PC browser (Chrome, Firefox, or Edge). Enter a name and click <strong>Create</strong>. A share link and QR code appear.</p>
+              <p class="mb-0">Open <a href="/">{{ siteUrl | replace("https://", "") }}</a> in your PC browser (Chrome, Firefox, or Edge). Enter a name and click <strong>Create</strong>. A share link and QR code appear.</p>
             </div>
           </div>
         </div>
@@ -50,7 +50,7 @@
             <div style="width:32px;height:32px;border-radius:50%;background:var(--em);color:#fff;display:flex;align-items:center;justify-content:center;font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:14px;flex-shrink:0;">2</div>
             <div>
               <h3 style="margin-top:0;">On your Android — Scan the QR Code</h3>
-              <p class="mb-0">Open Chrome on your Android phone. Go to <a href="/">share.rumnnlg.com</a> and tap <strong>Scan QR to join</strong>. Point your camera at the QR code on the PC screen. You'll join the room instantly.</p>
+              <p class="mb-0">Open Chrome on your Android phone. Go to <a href="/">{{ siteUrl | replace("https://", "") }}</a> and tap <strong>Scan QR to join</strong>. Point your camera at the QR code on the PC screen. You'll join the room instantly.</p>
             </div>
           </div>
         </div>

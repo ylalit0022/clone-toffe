@@ -2,8 +2,8 @@
 
 {% block title %}Terms of Service – Tranzo{% endblock %}
 {% block metaDesc %}Tranzo's terms of service. Read the rules for using our free peer-to-peer file transfer service.{% endblock %}
-{% block canonical %}<link rel="canonical" href="https://share.rumnnlg.com/terms" />{% endblock %}
-{% block ogUrl %}https://share.rumnnlg.com/terms{% endblock %}
+{% block canonical %}<link rel="canonical" href="{{ siteUrl }}/terms" />{% endblock %}
+{% block ogUrl %}{{ siteUrl }}/terms{% endblock %}
 
 {% block content %}
 <main class="content-page">
@@ -13,7 +13,7 @@
         <div class="page-eyebrow">&#128203; Legal</div>
         <h1>Terms of <span class="grad">Service</span></h1>
         <p class="lead">Last updated: <strong>January 2025</strong></p>
-        <p>By accessing or using Tranzo at <strong>share.rumnnlg.com</strong>, you agree to be bound by these Terms of Service.</p>
+        <p>By accessing or using Tranzo at <strong>{{ siteUrl | replace("https://", "") }}</strong>, you agree to be bound by these Terms of Service.</p>
 
         <h2>1. Acceptance of Terms</h2>
         <p>These terms govern your use of Tranzo. If you do not agree to these terms, you may not use the service.</p>

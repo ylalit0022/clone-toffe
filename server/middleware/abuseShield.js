@@ -252,7 +252,13 @@ function securityHeaders() {
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('X-XSS-Protection', '1; mode=block');
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+    
+    res.setHeader(
+   'Permissions-Policy',
+   'camera=(self), microphone=(), geolocation=()'
+    );
+
+
     // Don't leak server info
     res.removeHeader('X-Powered-By');
     res.removeHeader('Server');

@@ -155,6 +155,12 @@ app.use((req, res, next) => {
   next();
 });
 
+// ── Intercept /manifest.json BEFORE express.static ──────────────────────────
+// public/manifest.json is an old incomplete file (no id, no purpose fields,
+// wrong icon paths). express.static would serve it first and break PWA install.
+// next('route') skips to the real manifest handler registered further below.
+app.get('/manifest.json', (req, res, next) => next('route'));
+
 app.use(express.static(path.join(__dirname, 'public'), {
   maxAge: IS_DEV ? 0 : '1d',
   setHeaders(res, fp) {
@@ -266,10 +272,11 @@ app.post('/api/blog/cache-purge', (req, res) => {
 
 app.get('/manifest.json', (req, res) => {
   res.setHeader('Content-Type', 'application/manifest+json');
-  // CORS header so browsers can fetch the manifest cross-origin (needed for some Android WebViews)
+  // FIX: Use 'anonymous' not 'use-credentials' since ACAO is '*'.
+  // Sending credentials with a wildcard ACAO causes a CORS error in some browsers.
   res.setHeader('Access-Control-Allow-Origin', '*');
-  // No caching — manifest changes should be picked up immediately
-  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Cache-Control', 'no-cache, no-store');
   res.json({
     id: '/',                          // FIX: stable app identity for Chrome 96+
     name: 'Tranzo – P2P File Transfer',

@@ -1,0 +1,23 @@
+{#
+  blog/components/breadcrumbs.njk  —  Accessible breadcrumb nav
+  Variable: breadcrumbs  [ { label, url } ]
+#}
+{% if breadcrumbs and breadcrumbs.length > 1 %}
+<nav class="bc-bar" aria-label="Breadcrumb">
+  <ol class="bc-list" itemscope itemtype="https://schema.org/BreadcrumbList">
+    {% for crumb in breadcrumbs %}
+      <li class="bc-item" itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        {% if not loop.last %}
+          <a href="{{ crumb.url }}" class="bc-link" itemprop="item">
+            <span itemprop="name">{{ crumb.label }}</span>
+          </a>
+          <span class="bc-sep" aria-hidden="true">›</span>
+        {% else %}
+          <span class="bc-current" itemprop="name" aria-current="page">{{ crumb.label | truncate(40) }}</span>
+        {% endif %}
+        <meta itemprop="position" content="{{ loop.index }}" />
+      </li>
+    {% endfor %}
+  </ol>
+</nav>
+{% endif %}

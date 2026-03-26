@@ -32,6 +32,42 @@ const socket = io({
   timeout:              20000,
 });
 
+// ── ZIP lazy-load retry (when fflate loaded on-demand after cache miss) ───────
+window.addEventListener("tranzo:zip-ready", function(e) {
+  var pz = e.detail;
+  if (!pz || typeof fflate === "undefined") return;
+  var meta = pz.meta;
+  var ab   = pz.ab;
+  if (!ab) { dlog("[ZIP] retry: no ArrayBuffer saved"); return; }
+  setStatus("📦 Extracting " + meta.zipFiles.length + " files…");
+  _showExtractionModal(meta.zipFiles.length);
+  fflate.unzip(new Uint8Array(ab), function(err, files) {
+    _hideExtractionModal();
+    if (err) { setStatus("⚠️ Extraction failed — zip was already saved"); return; }
+    var entries = Object.entries(files);
+    var i = 0;
+    function next() {
+      if (i >= entries.length) {
+        setStatus("✅ Extracted " + entries.length + " files");
+        addMsg("<b>✅ Extracted " + entries.length + " files from bundle</b>");
+        return;
+      }
+      var name = entries[i][0], data = entries[i][1]; i++;
+      var fileInfo = (meta.zipFiles || []).find(function(f){ return f.name === name; }) || {};
+      var fileBlob = new Blob([data], { type: fileInfo.type || "application/octet-stream" });
+      var fileUrl  = URL.createObjectURL(fileBlob);
+      try {
+        var a = document.createElement("a");
+        a.href = fileUrl; a.download = name; a.style.display = "none";
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      } catch(e2) {}
+      addMsg("<span class='muted'>⬇️ Downloaded: " + name + " (" + fmtBytes(data.byteLength) + ")</span>");
+      setTimeout(next, 300);
+    }
+    next();
+  });
+});
+
 // ─── DEBUG ────────────────────────────────────────────────────────────────────
 const DEBUG = true;
 const dlog = (...a) => DEBUG && console.log("[P2P]", ...a);
@@ -1315,12 +1351,57 @@ function joinRoom(roomId, mode) {
     hideShareLink();
   }
 }
-createBtn.onclick = () => { requestNotifPermission(); const id = Math.random().toString(36).slice(2, 8).toUpperCase(); roomInput.value = id; joinRoom(id, "create"); };
-joinBtn.onclick   = () => { requestNotifPermission(); const r = roomInput.value.trim(); if (r) joinRoom(r, "join"); };
+// FIX: re-query elements at click time — Android may parse script before DOM flushes
+(function _wireRoomButtons() {
+  function _cb() { return document.getElementById("createBtn") || createBtn; }
+  function _jb() { return document.getElementById("joinBtn")   || joinBtn; }
+  function _ri() { return document.getElementById("roomId")    || roomInput; }
+
+  var cb = _cb(), jb = _jb();
+  if (cb) cb.onclick = function() {
+    requestNotifPermission();
+    var id = Math.random().toString(36).slice(2, 8).toUpperCase();
+    var ri = _ri(); if (ri) ri.value = id;
+    joinRoom(id, "create");
+  };
+  if (jb) jb.onclick = function() {
+    requestNotifPermission();
+    var ri = _ri();
+    var r  = ri ? ri.value.trim() : "";
+    if (r) joinRoom(r, "join");
+  };
+  // Retry once after DOMContentLoaded if buttons weren't in DOM yet
+  if (!cb || !jb) {
+    document.addEventListener("DOMContentLoaded", function() { _wireRoomButtons(); }, { once: true });
+  }
+})();
 socket.on("room-status", ({ room, users }) => {
   if (room !== currentRoom) return;
-  if (users >= 2) { setConnectedUI(true, "Connected", `Room: ${room} — ${users} user${users>2?"s":""} connected`); addMsg(`<span class="muted">✅ ${users} users in room.</span>`); }
-  else            { setConnectedUI(false, "Waiting...", `Room: ${room} — Waiting...`); }
+  if (users >= 2) {
+    setConnectedUI(true, "Connected", `Room: ${room} — ${users} user${users>2?"s":""} connected`);
+    // Only log the "users in room" message when it's a genuine new join, not a
+    // socket reconnect recovery (which fires room-status every time the tab
+    // comes back from the file picker, spamming the chat log).
+    const transferActive = (sendState.running && !sendState.canceled)
+                        || !!incomingFile || !!outgoingFile || !!pendingIncoming;
+    if (!transferActive) {
+      addMsg(`<span class="muted">✅ ${users} users in room.</span>`);
+    }
+  } else {
+    // FIX-WAITING-BADGE: Never flash "Waiting..." while a transfer is active.
+    // Opening the OS file picker backgrounds the tab on Android/iOS, causing
+    // Socket.IO to briefly disconnect. On reconnect the server fires room-status
+    // with users=1 (our re-join hasn't been processed yet), which was overwriting
+    // the "Sending…" / "Receiving…" UI with "Waiting..." mid-transfer.
+    // Guard: skip the downgrade if sender or receiver is actively running.
+    const transferActive = (sendState.running && !sendState.canceled)
+                        || !!incomingFile
+                        || !!outgoingFile
+                        || !!pendingIncoming;
+    if (!transferActive) {
+      setConnectedUI(false, "Waiting...", `Room: ${room} — Waiting...`);
+    }
+  }
 });
 
 // room-peers: received when we join — full list of existing members
@@ -1584,8 +1665,11 @@ document.addEventListener("visibilitychange", () => {
       dlog("[Visibility] Socket disconnected — forcing reconnect");
       socket.connect();
     }
-    // If we have a room, re-emit join-room as a safety net
-    if (currentRoom && socket.connected) {
+    // If we have a room, re-emit join-room as a safety net.
+    // FIX-DUAL-OFFER: Skip if a WebRTC reconnect is already in progress —
+    // re-joining the room can re-trigger the file-offer/answer flow and create
+    // a second offer race on top of the ongoing ICE negotiation.
+    if (currentRoom && socket.connected && !retryInProgress) {
       socket.emit("join-room", { roomId: currentRoom, deviceName: getDeviceName() });
     }
   }
@@ -1736,8 +1820,20 @@ function _afterEnqueue(validFiles) {
 
 // ── ZIP BUNDLE builder ────────────────────────────────────────────────────────
 // Uses fflate.Zip streaming: never buffers the full ZIP in RAM.
-// Each file is read via FileReader in chunks fed into a ZipDeflate entry.
+// Each file is read via blob.arrayBuffer() in chunks fed into a ZipDeflate entry.
 // Output chunks accumulate in zipChunks[], then assembled into one File.
+//
+// FIXES applied vs previous version:
+//   FIX-ZIP-1: fflate.Zip output chunks are Uint8Array VIEWS into fflate's
+//              internal streaming buffer. fflate reuses/overwrites that buffer
+//              on each successive chunk emission, so storing raw references
+//              caused all collected chunks to contain the same (last) data →
+//              corrupted ZIP. Fix: .slice() each chunk to force a copy.
+//   FIX-ZIP-2: Replaced legacy FileReader with blob.arrayBuffer() (native
+//              async I/O, same fix worker.js already uses). Eliminates the
+//              50-200ms per-chunk thread-hop overhead on Android Chrome.
+//   FIX-ZIP-3: deflate.push() now wrapped in try/catch so a synchronous
+//              fflate error is routed to rej() instead of being swallowed.
 async function zipAndEnqueue(files) {
   _zipInProgress = true;  // block startNextFile until zip is ready
   // ── Ensure fflate is loaded (lazy-load if CDN script hasn't run yet) ──────
@@ -1783,6 +1879,12 @@ async function zipAndEnqueue(files) {
   // Show zipping status
   setStatus(`🗜️ Compressing ${valid.length} files…`);
   addMsg(`<span class="muted">🗜️ Zipping ${valid.length} files (${fmtBytes(totalSize)}) into bundle…</span>`);
+  // Notify receiver that compression is in progress so they can show status
+  try {
+    if (currentRoom) socket.emit("zip-compressing", {
+      room: currentRoom, fileCount: valid.length, totalSize, senderName: getDeviceName()
+    });
+  } catch {}
 
   // Show each file as "zipping" in the queue while we build
   const zipQueueRows = valid.map(f => ({ name: f.name, state: "zipping", done: 0, total: f.size }));
@@ -1799,7 +1901,11 @@ async function zipAndEnqueue(files) {
     await new Promise((resolve, reject) => {
       const zip = new fflate.Zip((err, chunk, final) => {
         if (err) { reject(err); return; }
-        zipChunks.push(chunk);
+        // FIX-ZIP-1: .slice() to copy — fflate reuses its internal buffer
+        // across successive callback invocations. Storing a raw reference
+        // means every element in zipChunks ends up aliasing the same
+        // (last-written) memory, producing a corrupted ZIP on assembly.
+        zipChunks.push(chunk.slice());
         if (final) resolve();
       });
 
@@ -1813,25 +1919,38 @@ async function zipAndEnqueue(files) {
             const CHUNK = 2 * 1024 * 1024; // 2MB read chunks
             let offset = 0;
 
-            function readNext() {
+            // FIX-ZIP-2: blob.arrayBuffer() replaces legacy FileReader.
+            // FileReader.readAsArrayBuffer() has known 50-200ms thread-hop
+            // overhead on Android Chrome per chunk. blob.arrayBuffer() uses
+            // the browser's native async I/O path — same fix already in worker.js.
+            async function readNext() {
               const slice = file.slice(offset, offset + CHUNK);
-              const reader = new FileReader();
-              reader.onload = e => {
-                const buf = new Uint8Array(e.target.result);
+              try {
+                const arrayBuf = await slice.arrayBuffer();
+                const buf = new Uint8Array(arrayBuf);
                 offset += buf.byteLength;
                 zippedBytes += buf.byteLength;
                 // Update progress
-                const pct = Math.round((zippedBytes / totalSize) * 100);
+                const pct = totalSize > 0 ? Math.round((zippedBytes / totalSize) * 100) : 100;
                 setStatus(`🗜️ Compressing ${valid.length} files… ${pct}%`);
                 const isFinal = offset >= file.size;
-                deflate.push(buf, isFinal);
-                if (!isFinal) readNext();
-                else res();
-              };
-              reader.onerror = rej;
-              reader.readAsArrayBuffer(slice);
+                // FIX-ZIP-3: catch synchronous fflate errors from push()
+                try {
+                  deflate.push(buf, isFinal);
+                } catch (pushErr) {
+                  rej(pushErr);
+                  return;
+                }
+                if (!isFinal) {
+                  await readNext();
+                } else {
+                  res();
+                }
+              } catch (readErr) {
+                rej(readErr);
+              }
             }
-            readNext();
+            readNext().catch(rej);
           });
         }
         zip.end();
@@ -1851,6 +1970,8 @@ async function zipAndEnqueue(files) {
     addMsg(`<span class="muted">✅ Bundle ready: ${bundleName} (${fmtBytes(zipFile.size)}) — starting transfer…</span>`);
     _zipInProgress = false;
     window._zipPreviewRows = null;
+    // Notify receiver that compression finished
+    try { if (currentRoom) socket.emit("zip-ready", { room: currentRoom }); } catch {}
 
     // Enqueue the single zip file
     fileQueue.push(zipFile);
@@ -1970,6 +2091,9 @@ async function createPeerConnectionFor(socketId) {
           if (cur === "disconnected" || cur === "failed" || cur === "closed" || !cur) {
             dlog("ICE disconnected before DC opened — fast reconnect", socketId);
             showToast("Connection dropped — reconnecting...", "warn", 3000);
+            // FIX-RETRY-CHAIN: same as ICE "failed" path — release the lock
+            // before entering handlePeerFailed so the retry chain continues.
+            retryInProgress = false;
             handlePeerFailed(socketId);
           }
         }, 1500);
@@ -2009,6 +2133,14 @@ async function createPeerConnectionFor(socketId) {
         }
         dlog("ICE truly failed — triggering full reconnect", socketId);
         showToast("Connection lost — reconnecting...", "warn", 3000);
+        // FIX-RETRY-CHAIN: Reset retryInProgress before calling handlePeerFailed
+        // so sequential retry attempts can proceed. retryInProgress=true means
+        // "a reconnect offer is in-flight waiting for DC to open". When ICE
+        // fails, that offer clearly did NOT succeed — release the lock so the
+        // next backoff attempt can enter handlePeerFailed cleanly.
+        // This reset and the re-entry happen in the same synchronous call, so
+        // there is no window for a spurious concurrent entry.
+        retryInProgress = false;
         handlePeerFailed(socketId);
       }, 300);
       _iceFailTimers.set(socketId, t);
@@ -2078,17 +2210,21 @@ function handlePeerFailed(socketId) {
   const delay = Math.min(1000 * Math.pow(2, attempts - 1), 15000);
   dlog(`handlePeerFailed: attempt ${attempts}, delay ${delay}ms, shouldReconnect=${shouldReconnect}`, socketId);
 
-  // Close the dead peer BEFORE scheduling reconnect so removePeer's dc.close()
-  // doesn't re-trigger dc.onclose → handlePeerFailed again.
+  // ── Peer teardown ────────────────────────────────────────────────────────────
+  // For reconnects: do NOT close the PC here. makeOfferAndConnect() will attempt
+  // ICE restart on the existing PC, which reuses the DataChannel and avoids the
+  // teardown/recreate cycle that caused the "DC closed gen 2 mid-ICE" loop.
+  // Only close if we are NOT reconnecting (idle cleanup path).
   const peer = getPeer(socketId);
-  if (peer) {
-    peer.state = "closing";
-    try { peer.dc?.close(); } catch {}
-    try { peer.pc?.close(); } catch {}
-    peerConnections.delete(socketId);
-  }
 
   if (!shouldReconnect) {
+    // Clean up dead peer — not reconnecting.
+    if (peer) {
+      peer.state = "closing";
+      try { peer.dc?.close(); } catch {}
+      try { peer.pc?.close(); } catch {}
+      peerConnections.delete(socketId);
+    }
     // When not reconnecting (idle or completed), do NOT null _primaryPeerSocketId.
     // Keeping it means the next incoming offer from the sender can still be matched
     // via signaling. Nulling it here caused the receiver to lose its peer reference
@@ -2096,12 +2232,14 @@ function handlePeerFailed(socketId) {
     retryInProgress = false;
     return;
   }
+  // For reconnect path: mark peer as reconnecting but keep PC alive for ICE restart.
+  // If the PC is already closed (e.g. remote side closed), makeOfferAndConnect will
+  // detect this via signalingState === "closed" and do a full recreation instead.
+  if (peer) peer.state = "reconnecting";
 
-  // Only null _primaryPeerSocketId when we're actively reconnecting —
-  // it will be reassigned when makeOfferAndConnect creates the new peer.
-  if (socketId === _primaryPeerSocketId) {
-    _primaryPeerSocketId = null;
-  }
+  // With ICE restart, the PC is reused — keep _primaryPeerSocketId so the
+  // ICE restart offer/answer are routed to the correct peer object.
+  // It will be reassigned if makeOfferAndConnect falls back to full PC creation.
 
   showToast(`Connection lost — reconnecting... (attempt ${attempts})`, "warn", 4000);
 
@@ -2116,12 +2254,48 @@ function handlePeerFailed(socketId) {
 
   const timer = setTimeout(async () => {
     _reconnectTimers.delete(socketId);
+
+    // FIX-DUAL-OFFER: Only the SENDER (outgoingFile / sendState.running) should
+    // call makeOfferAndConnect(). If the RECEIVER calls it too, both sides
+    // simultaneously create new RTCPeerConnections and send offers to each other.
+    // Each side processes the other's offer → creates ANOTHER new PC → stomps the
+    // current one mid-ICE → ICE fails immediately → loop repeats indefinitely.
+    //
+    // The correct model: sender is always the offerer. When the receiver detects
+    // a DC drop, it signals the sender via "reconnect-request" and waits. The
+    // sender — which also detects the DC drop — will call makeOfferAndConnect()
+    // on its own. If the socket signal gets lost, the sender's own DC-close
+    // handler will also fire handlePeerFailed and re-offer anyway.
+    const isSender = sendState.running || (!!outgoingFile && sending);
+    if (!isSender) {
+      // Receiver path: signal the sender to re-offer, then wait.
+      // The sender's own onclose/ICE-fail handler will call makeOfferAndConnect.
+      // We emit reconnect-request as an extra nudge in case the sender's handler
+      // was suppressed (e.g. transferCompleted guard). Safety timeout: if no new
+      // offer arrives within 8s, reset the lock so user can retry manually.
+      dlog("[RECONNECT] receiver path — signaling sender to re-offer", socketId);
+      try { socket.emit("reconnect-request", { to: socketId }); } catch {}
+      setTimeout(() => {
+        if (retryInProgress) {
+          dlog("[RECONNECT] receiver wait timeout — releasing lock");
+          retryInProgress = false;
+        }
+      }, 8000);
+      return;
+    }
+
     try {
       await makeOfferAndConnect(socketId);
+      // FIX-RETRY-LOCK: Do NOT reset retryInProgress here.
+      // makeOfferAndConnect() returns as soon as the offer is sent — ICE is
+      // still negotiating. Resetting here let a second handlePeerFailed() enter
+      // the moment the new PC's ICE also failed (2-3s later), creating the
+      // gathering→checking→disconnected→failed loop seen in the console.
+      // retryInProgress is now cleared in channel.onopen (success path) or
+      // when we give up after MAX_RECONNECT_ATTEMPTS (failure path).
     } catch(e) {
       dlog("reconnect offer failed:", e);
-    } finally {
-      retryInProgress = false;
+      retryInProgress = false;   // offer itself failed — safe to retry
     }
   }, delay);
   _reconnectTimers.set(socketId, timer);
@@ -2142,6 +2316,12 @@ function setupDataChannelFor(socketId, channel, gen) {
     _reconnectAttempts.delete(socketId);
     _clearReconnectTimer(socketId);
     _clearIceFailTimer(socketId);
+    // FIX-RETRY-LOCK: DC opened successfully — release the reconnect lock.
+    // This is the only correct place to reset retryInProgress. Resetting it
+    // inside the makeOfferAndConnect() finally block was too early: the offer
+    // had been sent but ICE was still negotiating, allowing a second
+    // handlePeerFailed() to enter while the first reconnect was in-flight.
+    retryInProgress = false;
     startDcKeepalive();   // prevent SCTP 30s idle timeout between files
 
     if (sendState.running && !sendState.canceled) {
@@ -2494,9 +2674,54 @@ function handleRetransmitRequest(chunkIndex, channel) {
 }
 
 // ─── SIGNALING ────────────────────────────────────────────────────────────────
+// Monotonically increasing offer sequence number.
+// Stamped on every outgoing offer; the answerer drops stale/duplicate offers.
+let _offerSeq = 0;
+
 async function makeOfferAndConnect(targetSocketId) {
   const sid = targetSocketId || _primaryPeerSocketId;
   if (!sid) return;
+
+  const seq = ++_offerSeq;   // stamp this attempt
+
+  // ── ICE RESTART PATH ─────────────────────────────────────────────────────────
+  // If an RTCPeerConnection already exists AND its DataChannel is not closed,
+  // use ICE restart instead of tearing down and recreating the entire PC + DC.
+  //
+  // Requirements for ICE restart to work:
+  //   - PC signalingState must not be "closed"
+  //   - DC must not be "closed" (a closed DC cannot be reopened on the same PC)
+  //
+  // Benefits vs PC recreation:
+  //   - DC is REUSED: no onclose fires, no handlePeerFailed re-entry, no gen deadlock
+  //   - DTLS/SCTP is REUSED: no 200-400ms DTLS handshake per attempt
+  //   - Only ICE credentials refresh: reconnects in ~500ms vs 2-4s
+  const existingPeer = getPeer(sid);
+  const existingPcState = existingPeer?.pc?.signalingState;
+  const existingDcState = existingPeer?.dc?.readyState;
+  const canIceRestart = existingPeer?.pc
+    && existingPcState !== "closed"
+    && existingPcState !== undefined
+    && existingDcState !== "closed";   // closed DC can't be reused
+
+  if (canIceRestart) {
+    dlog("[CONNECT] ICE restart seq=" + seq, sid, "pc=" + existingPcState, "dc=" + existingDcState);
+    const pc = existingPeer.pc;
+    try {
+      const offer = await pc.createOffer({ iceRestart: true });
+      await pc.setLocalDescription(offer);
+      const sigMsg = { to: sid, sdp: pc.localDescription, _offerSeq: seq };
+      socket.emit("webrtc-offer", sigMsg);
+      _bcBroadcast({ type: "webrtc-offer", from: socket.id, ...sigMsg });
+      return;
+    } catch(e) {
+      dlog("[CONNECT] ICE restart failed — full recreation:", e.message);
+      // Fall through to full recreation
+    }
+  }
+
+  // ── FULL PC CREATION PATH ─────────────────────────────────────────────────────
+  dlog("[CONNECT] Full PC creation seq=" + seq, sid);
   const pc = await createPeerConnectionFor(sid);
   const channel = pc.createDataChannel("file", { ordered: true });
   const peer = getPeer(sid);
@@ -2505,21 +2730,52 @@ async function makeOfferAndConnect(targetSocketId) {
 
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
-  const sigMsg = { to: sid, sdp: pc.localDescription };
+  const sigMsg = { to: sid, sdp: pc.localDescription, _offerSeq: seq };
   socket.emit("webrtc-offer", sigMsg);
   _bcBroadcast({ type: "webrtc-offer", from: socket.id, ...sigMsg });
 }
 
-async function _handleWebrtcOffer({ from, sdp, resume }) {
+// Track the last processed offer sequence per peer to drop duplicates.
+const _lastOfferSeq = new Map();  // socketId → last _offerSeq processed
+
+async function _handleWebrtcOffer({ from, sdp, resume, _offerSeq: seq }) {
+  // Dedup: drop offers with the same or older sequence number.
+  // Duplicate offers arrive when both socket.io AND BroadcastChannel deliver
+  // the same offer (same-machine two-tab scenario), or when a reconnect timer
+  // fires a second makeOfferAndConnect while the first is still in ICE checking.
+  if (seq !== undefined) {
+    const lastSeq = _lastOfferSeq.get(from) ?? -1;
+    if (seq <= lastSeq) {
+      dlog("[OFFER] duplicate dropped seq=" + seq + " lastSeq=" + lastSeq, from);
+      return;
+    }
+    _lastOfferSeq.set(from, seq);
+  }
+
   _primaryPeerSocketId = from;
-  // Cancel any stale ICE-fail or reconnect timers for this peer before creating
-  // a new PC. Timers from the old (dying) PC can fire after the new PC is set up
-  // and call handlePeerFailed on the new connection, causing immediate ICE failure.
   _clearIceFailTimer(from);
   _clearReconnectTimer(from);
-  const pc = await createPeerConnectionFor(from);
-  await pc.setRemoteDescription(sdp);
 
+  // ── ICE RESTART ANSWER PATH ───────────────────────────────────────────────────
+  // Reuse existing PC+DC when possible (same logic as offerer side).
+  const existingPeer = getPeer(from);
+  const existingPcState = existingPeer?.pc?.signalingState;
+  const existingDcState = existingPeer?.dc?.readyState;
+  const canReusePC = existingPeer?.pc
+    && existingPcState !== "closed"
+    && existingPcState !== undefined
+    && existingDcState !== "closed";
+
+  let pc;
+  if (canReusePC) {
+    dlog("[OFFER] ICE restart answer seq=" + seq, from, "pc=" + existingPcState, "dc=" + existingDcState);
+    pc = existingPeer.pc;
+  } else {
+    dlog("[OFFER] Fresh PC creation seq=" + seq, from);
+    pc = await createPeerConnectionFor(from);
+  }
+
+  await pc.setRemoteDescription(sdp);
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);
   const sigMsg = { to: from, sdp: pc.localDescription };
@@ -2553,6 +2809,21 @@ async function _handleWebrtcIce({ from, candidate }) {
 socket.on("webrtc-offer",  msg => _handleWebrtcOffer(msg).catch(e => dlog("[SIGNAL] webrtc-offer handler error:", e)));
 socket.on("webrtc-answer", msg => _handleWebrtcAnswer(msg).catch(e => dlog("[SIGNAL] webrtc-answer handler error:", e)));
 socket.on("webrtc-ice",    msg => { _handleWebrtcIce(msg).catch(e => dlog("[SIGNAL] webrtc-ice handler error:", e)); });
+
+// FIX-DUAL-OFFER: Receiver signals sender to re-initiate WebRTC when it detects
+// a DC drop but is not the offerer. Sender calls handlePeerFailed() which will
+// makeOfferAndConnect() after the appropriate backoff delay.
+socket.on("reconnect-request", ({ from }) => {
+  const sid = from || _primaryPeerSocketId;
+  dlog("[SIGNAL] reconnect-request from receiver", sid);
+  if (!sid) return;
+  // Only act if we're the sender (have a file in progress) and not already retrying
+  const isSender = sendState.running || (!!outgoingFile && sending);
+  if (isSender && !retryInProgress) {
+    dlog("[SIGNAL] sender handling reconnect-request — calling handlePeerFailed");
+    handlePeerFailed(sid);
+  }
+});
 
 // ─── SAFE CLOSE ───────────────────────────────────────────────────────────────
 // ── CONNECTION REUSE ──────────────────────────────────────────────────────────
@@ -2634,6 +2905,34 @@ function cancelTransfer(reason, notifyPeer, canceledBy) {
   if (typeof TransferAlerts !== "undefined") TransferAlerts.onCanceled(byPeer);
 }
 socket.on("file-cancel", data => { if (!transferCompleted) cancelTransfer(`${data?.by || "Peer"} canceled`, false); });
+
+// ── RECEIVER: show compression status while sender zips multiple files ────────
+socket.on("zip-compressing", ({ fileCount, totalSize, senderName }) => {
+  // Only show if we are idle (not already receiving something)
+  if (incomingFile || sendState.running) return;
+  const who = senderName ? `${senderName} is` : "Sender is";
+  const sizeStr = totalSize ? ` (${fmtBytes(totalSize)})` : "";
+  const msg = `🗜️ ${who} compressing ${fileCount} files${sizeStr} into a bundle…`;
+  addMsg(`<span class="muted">${msg}</span>`);
+  setStatus(msg);
+  // Show in transfer-ui filename area
+  try {
+    const fnEl = document.getElementById("tui-filename");
+    if (fnEl) { fnEl.textContent = `Compressing bundle (${fileCount} files)…`; fnEl.classList.remove("tui-idle"); }
+    const stEl = document.getElementById("tui-status-text");
+    if (stEl) { stEl.textContent = "Preparing bundle…"; stEl.className = "tui-status-active"; }
+  } catch {}
+});
+
+socket.on("zip-ready", () => {
+  // Compression done — clear the compressing status; file-offer will arrive shortly
+  try {
+    const stEl = document.getElementById("tui-status-text");
+    if (stEl && stEl.textContent === "Preparing bundle…") {
+      stEl.textContent = "Bundle ready — connecting…";
+    }
+  } catch {}
+});
 
 // ─── BUFFER HELPERS ───────────────────────────────────────────────────────────
 function waitForBufferDrain(channel) {
@@ -2733,6 +3032,17 @@ function startNextFile() {
     if (outgoingFile === _watchdogFile && sending && !sendState.running) {
       const dcState = window.dc?.readyState;
       if (!dcState || dcState !== "open") {
+        // FIX-WATCHDOG: If a handlePeerFailed reconnect is already in flight,
+        // the watchdog must not fire a competing file-offer. Doing so causes
+        // the file-answer to call makeOfferAndConnect() on top of the ongoing
+        // ICE attempt → stomps the current PC → ICE fails → retryInProgress
+        // deadlock (handlePeerFailed is blocked by retryInProgress=true but
+        // nobody resets it because the DC never opens).
+        // Let handlePeerFailed finish its own reconnect attempt first.
+        if (retryInProgress) {
+          dlog("[WATCHDOG] retryInProgress — suppressing watchdog re-offer for", _watchdogFile.name);
+          return;
+        }
         dlog("[WATCHDOG] DC never opened for", _watchdogFile.name, "— re-emitting file-offer");
         showToast(`Connection stalled — retrying...`, "warn", 3000);
         // Close stale peer if any, then re-offer
@@ -2918,6 +3228,12 @@ socket.on("file-answer", async ({ from, accepted }) => {
   if (!_primaryPeerSocketId) _primaryPeerSocketId = from;
   setStatus("Accepted. Connecting P2P...");
   addMsg(`<span class="muted">📤 Accepted by ${from ? from.substring(0,6) : "peer"}. Connecting P2P...</span>`);
+  // FIX-ANSWER-LOCK: A new file-answer means the receiver has accepted a fresh
+  // file-offer (possibly from the watchdog or a manual retry). This supersedes
+  // any in-flight handlePeerFailed reconnect attempt. Reset retryInProgress so
+  // the new makeOfferAndConnect() is not blocked, and so that if THIS ICE attempt
+  // also fails, handlePeerFailed() can enter cleanly for the next retry.
+  retryInProgress = false;
   await makeOfferAndConnect(from);
 });
 
@@ -3035,19 +3351,26 @@ async function sendFile(file) {
   applyThreshold();
 
   // ── SEND LOOP ─────────────────────────────────────────────────────────────
-  // Design: pull-one-ahead model.
-  // We send one chunk, then pull one more from the worker — keeping exactly
-  // one chunk pre-loaded. This means chunkQueue stays at 1 entry, SCTP never
-  // sees more than one chunk queued at a time in JS memory, and the SCTP
-  // "send queue is full" error is eliminated entirely.
+  // Design: pull-two-ahead model.
+  // We send one chunk then immediately request TWO more from the worker,
+  // keeping chunkQueue at 2 entries. This hides the async latency of the
+  // worker's blob.arrayBuffer() read — while one chunk is being sent over
+  // SCTP, the worker is already reading the *next* chunk. With pull-one-ahead
+  // (depth=1) the DC had to stall for ~0.5-2ms per chunk waiting for the
+  // worker round-trip; at 256KB chunks that caps throughput at ~128-512 MB/s
+  // even on LAN. Two entries in-flight keeps the SCTP pipe continuously fed.
+  //
+  // chunkQueue is still bounded (target depth = PULL_AHEAD = 2) so SCTP
+  // "send queue is full" errors cannot occur — the queue never pre-loads
+  // more than 2 × 256KB = 512KB of JS memory ahead of the send position.
   //
   // Flow control is via dc.bufferedAmount:
   //   - if bufferedAmount >= HWM: pause, wait for bufferedamountlow event
   //   - if dc.send throws: backoff and retry (last resort)
-  //   - otherwise: send immediately and pull next chunk
+  //   - otherwise: send immediately and pull ahead
   //
-  // The pipeline depth (currentDepth) still controls how far ahead the
-  // worker reads — but chunkQueue is bounded to 1 entry at any time.
+  // The pipeline depth (currentDepth) still controls the retransmit ring size.
+  const PULL_AHEAD = 2;
   function sendLoop() {
     if (!sendState.running || sendState.canceled || allSent) return;
     if (loopRunning || waitingDrain) return;
@@ -3120,14 +3443,17 @@ async function sendFile(file) {
       sendState.offset     = Math.min(file.size, sendState.offset + buf.byteLength);
       sendState.chunkIndex = index + 1;
 
-      // ── Pull-one-ahead: request exactly one more chunk per send ───────────
-      // This is the core fix. Previously we batch-pulled (depth - queue.length)
-      // chunks on every successful send, causing the worker to fill chunkQueue
-      // to 93–97 entries before SCTP could report congestion. Now we pull
-      // exactly one chunk per chunk sent — queue stays at 0–1 entries.
-      // SCTP backpressure (bufferedAmount) controls the actual send rate.
+      // ── Pull-two-ahead: keep chunkQueue at PULL_AHEAD entries ────────────
+      // After sending a chunk, request enough pulls to bring the queue back
+      // up to PULL_AHEAD. If the queue already has PULL_AHEAD entries (worker
+      // delivered ahead of sends), skip the pull — no unbounded pre-loading.
+      // This hides the worker's blob.arrayBuffer() async latency: while SCTP
+      // is transmitting chunk N, the worker is already reading chunk N+2.
       if (!workerDone) {
-        fileWorker.postMessage({ type: "pull" });
+        const needed = PULL_AHEAD - chunkQueue.length;
+        for (let _p = 0; _p < needed; _p++) {
+          fileWorker.postMessage({ type: "pull" });
+        }
       }
 
       // Throughput sample for slow-TURN detection
@@ -3211,8 +3537,11 @@ async function sendFile(file) {
     allSent      = false;
     _sendBackoff = 50;
     fileWorker.postMessage({ type: "seek",  offset: safeOffset, chunkIndex: sendState.chunkIndex });
-    // Pull-one-ahead: seed with a single pull after seek, same as kick-off.
-    fileWorker.postMessage({ type: "pull" });
+    // Seed PULL_AHEAD pulls after seek — same as kick-off, same reasoning.
+    // Hides the first worker blob.arrayBuffer() round-trip after resume.
+    for (let _p = 0; _p < PULL_AHEAD; _p++) {
+      fileWorker.postMessage({ type: "pull" });
+    }
     // sendLoop will fire naturally once worker delivers the first chunk
   };
 
@@ -3372,10 +3701,12 @@ async function sendFile(file) {
   // ── KICK OFF ──────────────────────────────────────────────────────────────
   sendState.startChunkSize = NET.chunkSize;
   fileWorker.postMessage({ type: "start", file, chunkSize: NET.chunkSize, offset: 0, chunkIndex: 0 });
-  // Pull-one-ahead: seed with a single pull. sendLoop will pull one more per
-  // chunk sent, so chunkQueue never grows beyond 1 entry. This eliminates the
-  // SCTP "send queue is full" error caused by pre-loading 16+ chunks at once.
-  fileWorker.postMessage({ type: "pull" });
+  // Seed PULL_AHEAD pulls so the worker has the first two chunks ready before
+  // sendLoop starts. This prevents a stall on the very first chunk where the
+  // queue would otherwise be empty while the first async blob read completes.
+  for (let _p = 0; _p < PULL_AHEAD; _p++) {
+    fileWorker.postMessage({ type: "pull" });
+  }
 }
 
 // ─── RECEIVER ─────────────────────────────────────────────────────────────────
@@ -3700,6 +4031,50 @@ async function finalizeIncomingFile() {
       const url  = URL.createObjectURL(blob);
 
       // ── ZIP BUNDLE: download raw zip first, then auto-extract each file ──────
+      // FIX: lazy-load fflate if SW served cached page without the script
+      if (meta.zipBundle && meta.zipFiles) {
+        if (typeof fflate === "undefined") {
+          setStatus("📦 Loading extractor…");
+          var _fflateScript = document.createElement("script");
+          _fflateScript.src = "https://cdn.jsdelivr.net/npm/fflate@0.8.2/umd/index.js";
+          _fflateScript.onload = function() {
+            dlog("[ZIP] fflate lazy-loaded — retrying extraction");
+            // Re-call finalizeIncomingFile is not possible here (already past it),
+            // so we handle extraction directly with the saved blob URL
+            if (window._pendingZipExtract) {
+              var pz = window._pendingZipExtract;
+              window._pendingZipExtract = null;
+              window.dispatchEvent(new CustomEvent("tranzo:zip-ready", { detail: pz }));
+            }
+          };
+          _fflateScript.onerror = function() {
+            setStatus("⚠️ Extractor unavailable — zip saved as-is");
+            try {
+              var _a = document.createElement("a");
+              _a.href = url; _a.download = meta.name; _a.click();
+            } catch(e) {}
+          };
+          document.head.appendChild(_fflateScript);
+          // Save context for retry
+          window._pendingZipExtract = { url: url, meta: meta, blob: null };
+          // Store blob reference too
+          (function(savedBlob, savedMeta, savedUrl) {
+            blob.arrayBuffer().then(function(ab) {
+              if (window._pendingZipExtract &&
+                  window._pendingZipExtract.meta === savedMeta) {
+                window._pendingZipExtract.ab = ab;
+              }
+            });
+          })(blob, meta, url);
+          // Fall through — we'll download raw zip as safety net
+          try {
+            var _sa = document.createElement("a");
+            _sa.href = url; _sa.download = meta.name; _sa.style.display = "none";
+            document.body.appendChild(_sa); _sa.click(); document.body.removeChild(_sa);
+          } catch(e) {}
+          addToDownloadsManager({ name: meta.name, size: meta.size, type: "application/zip", savedToDisk: true, url: url });
+        }
+      }
       if (meta.zipBundle && meta.zipFiles && typeof fflate !== "undefined") {
         setStatus(`📦 Extracting ${meta.zipFiles.length} files…`);
         addMsg(`<span class="muted">📦 Bundle received — extracting ${meta.zipFiles.length} files…</span>`);

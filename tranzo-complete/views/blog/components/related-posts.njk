@@ -1,0 +1,14 @@
+{#
+  blog/components/related-posts.njk
+  Variable: relatedPosts  [ post, ... ]
+#}
+{% if relatedPosts and relatedPosts.length %}
+<section class="related-section" aria-label="Related articles">
+  <h2 class="related-title">Related Articles</h2>
+  <div class="related-grid">
+    {% for post in relatedPosts %}
+      {% include "blog/components/post-card.njk" %}
+    {% endfor %}
+  </div>
+</section>
+{% endif %}

@@ -1,592 +1,510 @@
-// Load .env FIRST — must be before any other require that reads process.env
-require("dotenv").config();
+// server.js — Tranzo v2
+require('dotenv').config();
 
-// ═══════════════════════════════════════════════════════════════
-//  server.js  — P2P File Transfer Signaling Server
-//
-//  IMPORTANT: Binds to 0.0.0.0 so it's reachable on:
-//    - http://localhost:3000          (same machine)
-//    - http://192.168.x.x:3000       (LAN / ipconfig IP)
-//    - http://0.0.0.0:3000           (all interfaces)
-//
-//  To find your LAN IP:
-//    Windows:  ipconfig  → look for "IPv4 Address"
-//    Linux/Mac: ip addr  → look for inet under your NIC
-// ═══════════════════════════════════════════════════════════════
+const express    = require('express');
+const http       = require('http');
+const { Server } = require('socket.io');
+const jwt        = require('jsonwebtoken');
+const path       = require('path');
+const helmet     = require('helmet');
+const cors       = require('cors');
+const nunjucks   = require('nunjucks');
+const os         = require('os');
 
-const express   = require("express");
-const http      = require("http");
-const { Server } = require("socket.io");
-const path      = require("path");
-const os        = require("os");
-const nunjucks  = require("nunjucks");
-const cookieParser = require("cookie-parser");
-const { sitemapHandler, staticSitemapHandler } = require("./sitemap");
-const blogRoutes             = require("./routes/blog");
-const { blogSitemapHandler } = require("./utils/blog/blogSitemap");
-const adminRoutes            = require("./routes/admin");
-const { pageCacheMiddleware } = require("./middleware/pageCache");
+const RoomManager = require('./server/services/RoomManager');
+const IceManager  = require('./server/services/IceManager');
+const AuditLogger = require('./server/services/AuditLogger');
+const RateLimiter = require('./server/services/RateLimiter');
 
-// ── MongoDB ───────────────────────────────────────────────────
-const { connectDB } = require("./db/mongodb");
-connectDB();   // non-blocking — server works even if Mongo is down
+const {
+  apiAbuseGuard, socketAbuseGuard, socketEventGuard,
+  roomCreationGuard, requestSizeGuard, securityHeaders,
+  extractIp,
+} = require('./server/middleware/abuseShield');
 
-// ── Auth routes ───────────────────────────────────────────────
-const authRoutes    = require("./routes/authRoutes");
-const accountRoutes = require("./routes/account");
-const { optionalAuth } = require("./middleware/authMiddleware");
+const { getClientIp, createToken } = require('./server/middleware/security');
+const errorHandler = require('./server/middleware/errorHandler');
+const roomsRouter  = require('./server/routes/rooms');
+const iceRouter    = require('./server/routes/ice');
+const redis        = require('./server/db/redis');
+const { connectDB }= require('./server/db/mongodb');
+const config       = require('./server/config');
 
-// ── [SECURITY] WebRTC signaling protection ────────────────────
-const security = require("./middleware/security");
+// IS_DEV: true when NODE_ENV=development (default)
+// All security guards are OFF in dev so LAN/Android testing always works
+const IS_DEV = config.node_env !== 'production';
 
+let blogRouter = null;
+try { blogRouter = require('./routes/blog'); } catch(e) { console.warn('Blog routes not loaded:', e.message); }
 
+// ── In-memory room store ──────────────────────────────────────────────────────
+const socketMeta = new Map();  // socketId → { roomId, deviceName }
+const rooms      = new Map();  // roomId   → Set<{ socketId, deviceName }>
+
+function getRoomMembers(roomId) {
+  return rooms.has(roomId) ? [...rooms.get(roomId)] : [];
+}
+function addToRoom(roomId, socketId, deviceName) {
+  if (!rooms.has(roomId)) rooms.set(roomId, new Set());
+  rooms.get(roomId).forEach(m => { if (m.socketId === socketId) rooms.get(roomId).delete(m); });
+  rooms.get(roomId).add({ socketId, deviceName });
+}
+function removeFromRoom(roomId, socketId) {
+  if (!rooms.has(roomId)) return;
+  rooms.get(roomId).forEach(m => { if (m.socketId === socketId) rooms.get(roomId).delete(m); });
+  if (rooms.get(roomId).size === 0) rooms.delete(roomId);
+}
+
+// ── App + Socket.IO ───────────────────────────────────────────────────────────
 const app    = express();
 const server = http.createServer(app);
 const io     = new Server(server, {
-  cors: { origin: "*", methods: ["GET","POST"] },
-  maxHttpBufferSize: 1e6,   // 1MB for signaling messages (SDP, ICE)
-
-  // ── FIX: Mobile file-picker / gallery disconnect ───────────────
-  pingInterval:  25000,
-  pingTimeout:   60000,
-  upgradeTimeout: 30000,
-
-  // ── FIX: Built-in Connection State Recovery (Socket.IO v4.6+) ──
-  connectionStateRecovery: {
-    maxDisconnectionDuration: 2 * 60 * 1000,
-    skipMiddlewares: true,
+  cors: {
+    // FIX: Use an explicit origin function instead of origin:true in dev.
+    // origin:true reflects any Origin header back as ACAO, which allows any
+    // website to make credentialed requests — a real CORS misconfiguration.
+    // Instead: allow localhost on any port + LAN IP patterns in dev.
+    origin: IS_DEV
+      ? (origin, cb) => {
+          // Allow: no-origin requests (same-origin, Postman, curl)
+          if (!origin) return cb(null, true);
+          // Allow: localhost and 127.0.0.1 on any port
+          if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return cb(null, true);
+          // Allow: LAN IP ranges (192.168.x.x, 10.x.x.x, 172.16-31.x.x)
+          if (/^https?:\/\/(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/.test(origin)) return cb(null, true);
+          // Block everything else — even in dev
+          return cb(null, false);
+        }
+      : config.allowed_origins,
+    methods:     ['GET', 'POST'],
+    credentials: true,
   },
+  maxHttpBufferSize:  1e5,
+  pingTimeout:        20000,
+  pingInterval:       25000,
+  upgradeTimeout:     10000,
+  connectionStateRecovery: { maxDisconnectionDuration: 2 * 60 * 1000, skipMiddlewares: true },
 });
 
-const PORT     = process.env.PORT     || 3000;
-const SITE_URL  = (process.env.SITE_URL || 'https://share.rumnnlg.com').replace(/\/$/, '');
-
-// ── Nunjucks template engine ──────────────────────────────────
-// FIX: use path.join(__dirname, ...) so this works regardless
-// of which directory the process is started from (PM2, systemd, etc.)
-nunjucks.configure(path.join(__dirname, "views"), {
-  autoescape: true,
-  express: app
+// ── Views ─────────────────────────────────────────────────────────────────────
+const njkEnv = nunjucks.configure(path.join(__dirname, 'views'), {
+  autoescape: true, express: app,
+  watch:   IS_DEV,
+  noCache: IS_DEV,
 });
-app.set("view engine", "njk");
+app.set('view engine', 'njk');
+app.set('views', path.join(__dirname, 'views'));
+njkEnv.addGlobal('siteUrl',    config.site_url);
+njkEnv.addGlobal('siteName',   'Tranzo');
+njkEnv.addGlobal('year',       new Date().getFullYear());
+njkEnv.addGlobal('pwaEnabled', true);
+njkEnv.addGlobal('ghostUrl',   config.ghost_url);
 
-// ── Static files ──────────────────────────────────────────────
-// NOTE: static MUST come before HTML-serving routes AND before
-// the HTTP rate limiter so that JS/CSS/image requests never
-// count against the per-IP request cap. express.static only
-// intercepts requests for files that actually exist in public/.
-// index.html is intentionally absent so the nunjucks "/" wins.
-app.use(express.static(path.join(__dirname, "public")));
+// ── Security headers (always on) ──────────────────────────────────────────────
+app.set('trust proxy', config.trust_proxy);
+app.use(securityHeaders());
 
-// HTML page cache
-app.use(pageCacheMiddleware);
+// Helmet CSP: OFF in dev (LAN IP breaks 'self' rule), ON in prod
+app.use(helmet({
+  // FIX: Set frameguard to 'deny' explicitly.
+  // helmet's default is SAMEORIGIN, which conflicts with our abuseShield
+  // securityHeaders() that sets DENY. helmet runs last and overwrites it.
+  // Setting it here ensures helmet outputs DENY, matching our policy.
+  frameguard: { action: 'deny' },
+  contentSecurityPolicy: IS_DEV ? false : {
+    directives: {
+      defaultSrc:  ["'self'"],
+      scriptSrc:   ["'self'", "'unsafe-inline'", 'cdn.jsdelivr.net', 'fonts.googleapis.com'],
+      styleSrc:    ["'self'", "'unsafe-inline'", 'cdn.jsdelivr.net', 'fonts.googleapis.com'],
+      fontSrc:     ["'self'", 'fonts.gstatic.com', 'fonts.googleapis.com'],
+      connectSrc:  ["'self'", 'wss:', 'ws:'],
+      imgSrc:      ["'self'", 'data:', 'blob:'],
+      workerSrc:   ["'self'", 'blob:'],
+      manifestSrc: ["'self'"],
+    },
+  },
+  crossOriginEmbedderPolicy: false,
+}));
 
-
-// ── Body parsers + cookie parser ─────────────────────────────
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.use(cookieParser());
-
-// ── Auth routes (/auth/* and /account/*) ─────────────────────
-// Mounted BEFORE page routes so /auth/login etc. resolve correctly.
-app.use("/auth",    authRoutes);
-app.use("/account", accountRoutes);
-
-// ── Top-level /logout shortcut (for navbar <a href="/logout">) ─
-app.get("/logout", (req, res) => res.redirect("/auth/logout"));
-
-// ── injectUser — populates currentUser in every Nunjucks template ──
-// Uses optionalAuth so unauthenticated visitors just get currentUser=null.
-// Must be registered AFTER cookie-parser and BEFORE page routes.
-app.use(optionalAuth, (req, res, next) => {
-  res.locals.currentUser = req.user || null;
-  // Inject siteUrl into every Nunjucks template automatically.
-  // Change SITE_URL in .env — no template edits needed.
-  res.locals.siteUrl = SITE_URL;
+// ── Core middleware ────────────────────────────────────────────────────────────
+// HTTP CORS — same origin policy as Socket.IO above
+app.use(cors({
+  origin: IS_DEV
+    ? (origin, cb) => {
+        if (!origin) return cb(null, true);
+        if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return cb(null, true);
+        if (/^https?:\/\/(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/.test(origin)) return cb(null, true);
+        return cb(null, false);
+      }
+    : config.allowed_origins,
+  credentials: true,
+}));
+app.use(express.json({ limit: '50kb' }));
+app.use(express.urlencoded({ extended: true, limit: '10kb' }));
+if (!IS_DEV) app.use(requestSizeGuard(100_000));  // size guard: prod only
+// ── Block sensitive server-side files ────────────────────────────────────────
+// Explicitly reject requests for source code and config files that should
+// NEVER be served over HTTP, regardless of how the server is configured.
+// This is a defence-in-depth layer — production nginx also blocks these,
+// but the app-level block ensures they can't leak in any environment.
+const BLOCKED_PATHS = /^\/?(server\.js|\.env.*|config\.js|package\.json|package-lock\.json|yarn\.lock|\.git|node_modules|\.npmrc|\.eslintrc|Dockerfile|docker-compose)/i;
+app.use((req, res, next) => {
+  if (BLOCKED_PATHS.test(req.path)) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
   next();
 });
 
-app.get("/sitemap.xml",        sitemapHandler);
-app.get("/sitemap-static.xml", staticSitemapHandler);
-app.get("/blog-sitemap.xml",   blogSitemapHandler);
+app.use(express.static(path.join(__dirname, 'public'), {
+  maxAge: IS_DEV ? 0 : '1d',
+  setHeaders(res, fp) {
+    if (fp.endsWith('sw.js')) {
+      res.setHeader('Service-Worker-Allowed', '/');
+      res.setHeader('Cache-Control', 'no-cache');
+    }
+  },
+}));
+app.use((req, res, next) => { req.clientIp = extractIp(req); next(); });
 
-// ── robots.txt ───────────────────────────────────────────────
-app.get("/robots.txt", (req, res) => {
-  res.setHeader("Content-Type", "text/plain");
-  res.send([
-    "User-agent: *",
-    "Allow: /",
-    "Disallow: /api/",
-    "",
-    `Sitemap: ${SITE_URL}/sitemap.xml`,
-    `Sitemap: ${SITE_URL}/blog-sitemap.xml`,
-  ].join("\n"));
+// ── Services init ─────────────────────────────────────────────────────────────
+let roomManager, iceManager, auditLogger, rateLimiter;
+(async () => {
+  try {
+    const db = await connectDB();
+    roomManager = new RoomManager(redis.client, db);
+    iceManager  = new IceManager(redis.client);
+    auditLogger = new AuditLogger(db);
+    rateLimiter = new RateLimiter(redis.client);
+    roomsRouter.setDependencies(roomManager, auditLogger, rateLimiter);
+    iceRouter.setDependencies(iceManager, rateLimiter);
+    console.log('✓ All services initialized');
+  } catch (err) {
+    console.error('❌ Service init:', err.message);
+    if (!IS_DEV) process.exit(1);
+    console.warn('⚠️  Running in degraded mode (no DB)');
+  }
+})();
+
+// ── REST API routes ────────────────────────────────────────────────────────────
+// API abuse guard: prod only
+if (!IS_DEV) app.use('/api/', apiAbuseGuard({ globalRpm: 300, burstRps: 20 }));
+
+app.use('/api/v1/rooms', (req, res, next) => {
+  if (!roomManager) return res.status(503).json({ error: 'Service initializing, retry in a moment' });
+  // Room creation guard: prod only
+  if (!IS_DEV && req.method === 'POST' && !req.path.includes('/join') && !req.path.includes('/leave')) {
+    return roomCreationGuard({ maxPerHour: 10, maxPerDay: 30 })(req, res, next);
+  }
+  next();
+});
+app.use('/api/v1/rooms', roomsRouter);
+app.use('/api/v1/ice',   iceRouter);
+
+// ── Utility endpoints ──────────────────────────────────────────────────────────
+// /ping — bare connectivity check, no auth, no middleware
+app.get('/ping', (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ ok: true, ts: Date.now(), env: config.node_env });
 });
 
-// ── /api/ice-config — serve TURN credentials server-side ──────
-app.get("/api/ice-config", (req, res) => {
-  const indiaHost  = process.env.INDIA_TURN_HOST || "";
-  const indiaUser  = process.env.INDIA_TURN_USER || "";
-  const indiaPass  = process.env.INDIA_TURN_PASS || "";
-  const meteredUser = process.env.METERED_USER || "";
-  const meteredPass = process.env.METERED_PASS || "";
+// /pwa-debug — quick PWA installability diagnosis (dev only)
+app.get('/pwa-debug', (req, res) => {
+  const isSecure = req.secure || req.headers['x-forwarded-proto'] === 'https';
+  const host = req.headers.host || '';
+  const isLocalhost = host.startsWith('localhost') || host.startsWith('127.0.0.1');
+  const isLanIp = /^(192\.168|10\.|172\.(1[6-9]|2[0-9]|3[01]))/.test(host);
 
-  const iceServers = [
-    { urls: "stun:stun.l.google.com:19302" },
-    { urls: "stun:stun1.l.google.com:19302" },
-    { urls: "stun:stun2.l.google.com:19302" },
-    { urls: "stun:stun3.l.google.com:19302" },
-    { urls: "stun:stun4.l.google.com:19302" },
-    { urls: "stun:stun.cloudflare.com:3478" },
-  ];
-
-  if (indiaHost && indiaUser && indiaPass) {
-    iceServers.push({
-      urls: [
-        `turn:${indiaHost}:3478?transport=udp`,
-        `turn:${indiaHost}:3478?transport=tcp`,
-        `turns:${indiaHost}:5349?transport=tcp`,
-      ],
-      username: indiaUser,
-      credential: indiaPass,
-    });
-  }
-
-  if (meteredUser && meteredPass) {
-    iceServers.push({
-      urls: [
-        "turn:global.relay.metered.ca:80?transport=udp",
-        "turn:global.relay.metered.ca:80?transport=tcp",
-        "turn:global.relay.metered.ca:443?transport=tcp",
-        "turns:global.relay.metered.ca:443?transport=tcp",
-      ],
-      username: meteredUser,
-      credential: meteredPass,
-    });
-  }
-
-  res.setHeader("Cache-Control", "private, max-age=300");
-  res.json({ iceServers });
-});
-
-// ── /api/site-config — exposes SITE_URL to browser JS ───────
-// Allows ice.js / script.js to read the active domain without
-// hardcoding. Cached 24h (changes only on redeploy).
-app.get("/api/site-config", (req, res) => {
-  res.setHeader("Cache-Control", "public, max-age=86400");
+  res.setHeader('Cache-Control', 'no-store');
   res.json({
-    siteUrl:   SITE_URL,
-    turnHosts: [process.env.INDIA_TURN_HOST || ""].filter(Boolean),
+    pwaDebug: true,
+    secure: isSecure,
+    host,
+    isLocalhost,
+    isLanIp,
+    pwaInstallable: isSecure || isLocalhost,
+    note: isLanIp && !isSecure
+      ? 'LAN IP over HTTP: Chrome on Android will NOT install PWA. Use port forwarding or chrome://flags/#unsafely-treat-insecure-origin-as-secure'
+      : isLocalhost
+      ? 'localhost: PWA installable on desktop Chrome without HTTPS'
+      : isSecure
+      ? 'HTTPS: PWA installable on all platforms'
+      : 'Unknown context',
+    manifest: '/manifest.json',
+    sw: '/sw.js',
   });
 });
 
-// ════════════════════════════════════════════════════════════════
-//  PAGE ROUTES
-//
-//  HOW TO ADD A NEW PAGE:
-//  ──────────────────────
-//  1. Create  views/pages/my-page.njk  (extend base.njk)
-//  2. Add a route below:
-//       app.get("/my-page", (req,res) => res.render("pages/my-page.njk"));
-//  3. Add the route to sitemap.js ROUTES array.
-//  4. Add a link in base.njk navbar / footer as needed.
-//  5. pm2 restart share  (or node server.js)
-// ════════════════════════════════════════════════════════════════
-
-// ── Homepage ──────────────────────────────────────────────────
-app.get("/", (req, res) => {
-  console.log("INDEX ROUTE HIT");
-  res.render("pages/index.njk");
+app.get('/api/health', (req, res) => {
+  // SECURITY: Don't leak version/uptime in production (reduces fingerprinting surface)
+  const body = { status: 'ok' };
+  if (!IS_DEV) return res.json(body);
+  res.json({ ...body, version: '2.0.0', pwa: true, uptime: Math.round(process.uptime()) });
 });
 
-// ── Feature / landing pages ───────────────────────────────────
-app.get("/send-large-files",            (req, res) => res.render("pages/send-large-files.njk"));
-app.get("/android-to-pc-file-transfer", (req, res) => res.render("pages/android-to-pc-file-transfer.njk"));
-app.get("/webrtc-file-transfer",        (req, res) => res.render("pages/webrtc-file-transfer.njk"));
-
-// ── Informational pages ───────────────────────────────────────
-app.get("/security",    (req, res) => res.render("pages/security.njk"));
-app.get("/about",       (req, res) => res.render("pages/about.njk"));
-app.get("/how-it-works",(req, res) => res.render("pages/how-it-works.njk"));
-app.get("/faq",         (req, res) => res.render("pages/faq.njk"));
-
-// ── Legal & contact ───────────────────────────────────────────
-app.get("/contact",    (req, res) => res.render("pages/contact.njk"));
-app.get("/privacy",    (req, res) => res.render("pages/privacy.njk"));
-app.get("/terms",      (req, res) => res.render("pages/terms.njk"));
-app.get("/cookies",    (req, res) => res.render("pages/cookies.njk"));
-app.get("/disclaimer", (req, res) => res.render("pages/disclaimer.njk"));
-
-app.use("/blog",  blogRoutes);
-app.use("/admin", adminRoutes);
-
-app.post("/api/blog/cache-purge", async (req, res) => {
-  const { secret, key } = req.body || {};
-  if (secret !== (process.env.CACHE_PURGE_SECRET || "change-me"))
-    return res.status(403).json({ error: "Forbidden" });
-  try {
-    const { purgeCache } = require("./utils/blog/ghost");
-    const deleted = await purgeCache(key || null);
-    res.json({ ok: true, deleted });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+app.get('/api/ice-config', async (req, res) => {
+  try { if (iceManager) return res.json(await iceManager.getServers()); } catch {}
+  res.json({ iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' },
+  ]});
 });
 
-app.use((req, res) => {
-  res.status(404).render("pages/404.njk");
+app.get('/api/site-config', (req, res) => {
+  // SECURITY: Don't expose internal TURN host IPs to the public.
+  // The client only needs these for RTT display labels — pass a boolean instead.
+  res.json({ siteUrl: config.site_url, pwa: true, hasTurn: !!(config.turn?.india_host) });
 });
 
-// ════════════════════════════════════════════════════════════════
-//  SOCKET.IO  —  Room state & signaling (unchanged)
-// ════════════════════════════════════════════════════════════════
+app.post('/api/blog/cache-purge', (req, res) => {
+  const secret = req.headers['x-cache-purge-secret'] || req.query.secret;
+  if (!config.cache_purge_secret || secret !== config.cache_purge_secret)
+    return res.status(401).json({ error: 'Unauthorized' });
+  res.json({ ok: true, message: 'Cache purged' });
+});
 
-// ── Room state ────────────────────────────────────────────────
-const rooms = new Map();   // roomId → Set of { socketId, deviceName }
+app.get('/manifest.json', (req, res) => {
+  res.setHeader('Content-Type', 'application/manifest+json');
+  // CORS header so browsers can fetch the manifest cross-origin (needed for some Android WebViews)
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  // No caching — manifest changes should be picked up immediately
+  res.setHeader('Cache-Control', 'no-cache');
+  res.json({
+    id: '/',                          // FIX: stable app identity for Chrome 96+
+    name: 'Tranzo – P2P File Transfer',
+    short_name: 'Tranzo',
+    description: 'Transfer files directly. No cloud. No signup.',
+    start_url: '/?source=pwa',
+    display: 'standalone',
+    background_color: '#FFFFFF',
+    theme_color: '#059669',
+    orientation: 'any',
+    scope: '/',
+    lang: 'en',
+    icons: [
+      // FIX: 'any' and 'maskable' MUST be separate entries.
+      // Chrome 93+ rejects 'any maskable' as a single purpose string,
+      // which silently blocks the installability check on Android.
+      { src: '/img/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
+      { src: '/img/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'maskable' },
+      { src: '/img/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+      { src: '/img/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+    ],
+    shortcuts: [
+      { name: 'Create Room', url: '/?action=create', icons: [{ src: '/img/icon-192.png', sizes: '192x192' }] },
+    ],
+    prefer_related_applications: false,
+    categories: ['utilities', 'productivity'],
+  });
+});
 
-// ── Room activity tracker ─────────────────────────────────────
-// roomId → timestamp (ms) of last observed activity.
-// Updated on: join, file-offer, webrtc-offer.
-// Read by the idle room reaper every REAPER_INTERVAL_MS.
-const roomActivity = new Map();
+// ── Page routes ───────────────────────────────────────────────────────────────
+app.get('/', (req, res) =>
+  res.render('pages/index.njk', { autoJoinRoom: req.query.room || null, autoCreate: req.query.action === 'create' })
+);
+app.get('/room/:roomId', (req, res) => res.render('pages/index.njk', { autoJoinRoom: req.params.roomId }));
 
-function touchRoom(roomId) {
-  if (roomId) roomActivity.set(roomId, Date.now());
+const staticPages = [
+  '/about', '/how-it-works', '/faq', '/privacy', '/terms', '/security',
+  '/contact', '/cookies', '/disclaimer', '/send-large-files',
+  '/android-to-pc-file-transfer', '/webrtc-file-transfer',
+];
+staticPages.forEach(p => app.get(p, (req, res) => res.render('pages' + p + '.njk')));
+
+app.get('/auth/login',       (req, res) => res.render('pages/auth/login.njk'));
+app.get('/auth/register',    (req, res) => res.render('pages/auth/register.njk'));
+app.get('/account/sessions', (req, res) => res.render('pages/account/sessions.njk'));
+
+if (blogRouter) {
+  app.use('/blog', blogRouter);
+} else {
+  app.get('/blog',              (req, res) => res.render('blog/list.njk',   { posts: [], pagination: null }));
+  app.get('/blog/author/:name', (req, res) => res.render('blog/author.njk', { author: req.params.name, posts: [] }));
+  app.get('/blog/:slug',        (req, res) => res.render('blog/post.njk',   { post: { slug: req.params.slug } }));
 }
 
-// ── Idle Room Reaper ─────────────────────────────────────────
-// Prevents ghost rooms from accumulating when:
-//   • Peer A joins but Peer B never arrives
-//   • Both peers close their tabs simultaneously
-//   • A transfer fails and neither peer re-joins within 90s
-//
-// Runs every REAPER_INTERVAL_MS (5 min default).
-// Only evicts a room when ALL of the following are true:
-//   1. The room has had no activity for ROOM_IDLE_MS (10 min default)
-//   2. No live sockets are present (room.size === 0) OR all occupants
-//      are already in the gracePending map (i.e. physically disconnected)
-//
-// This is safe: active peers keep touching the room on every event,
-// so the reaper will never evict a room with live participants.
-//
-// Tuneable via .env:
-//   ROOM_IDLE_MS=600000      (default: 10 minutes)
-//   REAPER_INTERVAL_MS=300000 (default: 5 minutes)
+app.use((req, res) => res.status(404).render('pages/404.njk'));
 
-const ROOM_IDLE_MS       = parseInt(process.env.ROOM_IDLE_MS)       || 10 * 60 * 1000;
-const REAPER_INTERVAL_MS = parseInt(process.env.REAPER_INTERVAL_MS) ||  5 * 60 * 1000;
+// ── Socket.IO ─────────────────────────────────────────────────────────────────
+// Socket abuse guard: prod only — in dev every device connects freely
+if (!IS_DEV) io.use(socketAbuseGuard({ maxConnsPerIp: 20, connRateLimit: 60 }));
 
-const _reaperTimer = setInterval(() => {
-  const now    = Date.now();
-  let   reaped = 0;
+io.use((socket, next) => {
+  const token = socket.handshake.auth.token;
+  if (!token) { socket.user = null; return next(); }
+  try   { socket.user = jwt.verify(token, config.jwt_secret); next(); }
+  catch { socket.user = null; next(); }
+});
 
-  for (const [roomId, lastActive] of roomActivity) {
-    if (now - lastActive < ROOM_IDLE_MS) continue;  // still fresh
-
-    const room = rooms.get(roomId);
-
-    // Collect grace-period socket IDs for this room
-    const graceSids = new Set(
-      [...gracePending.entries()]
-        .filter(([, v]) => v.roomId === roomId)
-        .map(([sid]) => sid)
-    );
-
-    const liveCount  = room ? room.size : 0;
-    const allInGrace = liveCount > 0 && [...room].every(p => graceSids.has(p.socketId));
-
-    if (liveCount === 0 || allInGrace) {
-      // Cancel any lingering grace timers to prevent double-eviction
-      for (const [sid, v] of gracePending) {
-        if (v.roomId !== roomId) continue;
-        clearTimeout(v.timer);
-        gracePending.delete(sid);
-      }
-      rooms.delete(roomId);
-      roomActivity.delete(roomId);
-      reaped++;
-      console.log(
-        `[Reaper] Evicted idle room "${roomId}" ` +
-        `(inactive ${Math.round((now - lastActive) / 60000)}min, ${liveCount} ghost peer(s) cleared)`
-      );
-    }
-  }
-
-  if (reaped) {
-    console.log(`[Reaper] Sweep complete — ${reaped} room(s) evicted. Active rooms: ${rooms.size}`);
-  }
-}, REAPER_INTERVAL_MS);
-
-if (_reaperTimer.unref) _reaperTimer.unref();  // don't prevent clean process exit
-
-// ── Grace-period map ──────────────────────────────────────────
-const gracePending = new Map(); // socketId → { roomId, deviceName, timer }
-
-// ── Socket.IO events ──────────────────────────────────────────
-io.on("connection", (socket) => {
-  console.log(`[+] Connected: ${socket.id}`);
-
+io.on('connection', (socket) => {
+  const ip = socket._clientIp || socket.handshake.address;
   let currentRoom = null;
-  let deviceName  = "Unknown";
+  let deviceName  = socket.id.slice(0, 6);
 
-  // ── JOIN ROOM ──────────────────────────────────────────────
-  socket.on("join-room", ({ roomId, deviceName: name }) => {
-    deviceName = name || socket.id.slice(0, 6);
-    // Validate room ID format (no rate limit)
-    if (!security.allowJoin(socket, roomId)) return;
+  // Event rate limits — relaxed in dev so mobile never gets blocked
+  const LIM = IS_DEV
+    ? { join: 500, sig: 2000, file: 500, chat: 500 }
+    : { join: 5,   sig: 300,  file: 20,  chat: 30  };
 
+  function broadcastMemberList(roomId) {
+    const members = getRoomMembers(roomId);
+    io.to(roomId).emit('room-member-list', { room: roomId, members });
+  }
 
-    // ── Recovered session fast-path ──────────────────────────
-    if (socket.recovered) {
-      console.log(`[Room ${roomId}] ${deviceName} session RECOVERED (no peer disruption)`);
-      const room = rooms.get(roomId);
-      if (room) {
-        room.forEach(p => { if (p.deviceName === deviceName) p.socketId = socket.id; });
+  function leaveRoom(roomId) {
+    if (!roomId) return;
+    socket.leave(roomId);
+    removeFromRoom(roomId, socket.id);
+    const members = getRoomMembers(roomId);
+    io.to(roomId).emit('room-status',      { room: roomId, users: members.length, left: socket.id, deviceName });
+    io.to(roomId).emit('room-member-list', { room: roomId, members });
+    io.to(roomId).emit('peer-left',        { socketId: socket.id, deviceName });
+  }
+
+  socket.on('join-room', ({ roomId, deviceName: dName } = {}) => {
+    if (!socketEventGuard(socket, 'join-room', LIM.join)) return;
+
+    roomId = (roomId || '').trim().slice(0, 50);
+    dName  = (dName  || '').replace(/[<>'"&]/g, '').slice(0, 50) || socket.id.slice(0, 6);
+    if (!roomId) return;
+
+    deviceName = dName;
+    socketMeta.set(socket.id, { roomId, deviceName });
+
+    if (currentRoom && currentRoom !== roomId) leaveRoom(currentRoom);
+
+    const existingSize = rooms.get(roomId)?.size || 0;
+    if (existingSize >= 2) {
+      const members = getRoomMembers(roomId);
+      const isReconnect = members.some(m => m.deviceName === deviceName);
+      if (!isReconnect) {
+        socket.emit('room-full', { code: 'ROOM_FULL', message: 'This room already has two participants.' });
+        return;
       }
-      gracePending.forEach((v, k) => {
-        if (v.roomId === roomId && v.deviceName === deviceName) {
-          clearTimeout(v.timer);
-          gracePending.delete(k);
-        }
-      });
-      socket.join(roomId);
-      currentRoom = roomId;
-      const users = rooms.get(roomId)?.size || 1;
-      // recovered=true tells the client this is a silent reconnect — no "Ready" toast
-      io.to(roomId).emit("room-status", { room: roomId, users, joined: socket.id, deviceName, recovered: true });
-      const peers = [...(rooms.get(roomId) || [])]
-        .filter(p => p.socketId !== socket.id)
-        .map(p => ({ socketId: p.socketId, deviceName: p.deviceName }));
-      socket.emit("room-peers", peers);
-      const fullList2 = [...(rooms.get(roomId) || [])].map(p => ({ socketId: p.socketId, deviceName: p.deviceName }));
-      io.to(roomId).emit("room-member-list", { room: roomId, members: fullList2 });
-      return;
+      members.forEach(m => { if (m.deviceName === deviceName) m.socketId = socket.id; });
     }
-
-    if (currentRoom) {
-      leaveRoom(socket, currentRoom);
-    }
-
-    // ── [ONE-TO-ONE] Enforce max 2 peers per room ─────────────
-    // Count confirmed room members PLUS any grace-period slots (peers who
-    // disconnected briefly but haven't been evicted yet). This prevents a
-    // third browser tab from sneaking in during the 90-second grace window.
-    const existingRoom    = rooms.get(roomId);
-    const confirmedPeers  = existingRoom ? existingRoom.size : 0;
-    const gracePeers      = [...gracePending.values()].filter(v => v.roomId === roomId).length;
-    const effectivePeers  = confirmedPeers + gracePeers;
-
-    // Exception: a grace-period reconnect for this exact deviceName is allowed
-    // (it's the same person reconnecting, not a new third party).
-    const isGraceReconnect = [...gracePending.values()].some(
-      v => v.roomId === roomId && v.deviceName === (name || socket.id.slice(0, 6))
-    );
-
-    if (effectivePeers >= 2 && !isGraceReconnect) {
-      console.warn(`[Room ${roomId}] FULL — rejected ${name || socket.id.slice(0,6)} (${effectivePeers} peers present)`);
-      security.secLog("ROOM_FULL", security.getIp(socket), {
-        roomId,
-        deviceName: name || socket.id.slice(0, 6),
-        confirmedPeers,
-        gracePeers,
-      });
-      socket.emit("room-full", {
-        code:    "ROOM_FULL",
-        message: "This room already has two participants. Only one sender and one receiver are allowed.",
-      });
-      return;
-    }
-
-    gracePending.forEach((v, k) => {
-      if (v.roomId === roomId && v.deviceName === deviceName) {
-        clearTimeout(v.timer);
-        gracePending.delete(k);
-        const room = rooms.get(roomId);
-        if (room) room.forEach(p => { if (p.socketId === k) room.delete(p); });
-        console.log(`[Room ${roomId}] ${deviceName} rejoined within grace — connection restored`);
-      }
-    });
 
     currentRoom = roomId;
     socket.join(roomId);
-    touchRoom(roomId);  // ← [REAPER] mark room as active on join
+    addToRoom(roomId, socket.id, deviceName);
+    if (auditLogger) auditLogger.log('socket-join', { roomId, deviceName }, ip).catch(() => {});
 
-    if (!rooms.has(roomId)) rooms.set(roomId, new Set());
-    rooms.get(roomId).add({ socketId: socket.id, deviceName });
+    const members = getRoomMembers(roomId);
+    const users   = members.length;
+    io.to(roomId).emit('room-status', { room: roomId, users, joined: socket.id, deviceName });
+    socket.emit('room-peers', members.filter(m => m.socketId !== socket.id));
+    broadcastMemberList(roomId);
+    console.log(`[Room ${roomId}] ${deviceName} joined (${users}/2)`);
+  });
 
-    const users = rooms.get(roomId).size;
-    console.log(`[Room ${roomId}] ${deviceName} joined (${users} users)`);
+  socket.on('webrtc-offer',  ({ to, sdp, _offerSeq }) => { if (socketEventGuard(socket, 'webrtc-offer',  LIM.sig)) io.to(to).emit('webrtc-offer',  { from: socket.id, sdp, _offerSeq }); });
+  socket.on('webrtc-answer', ({ to, sdp })       => { if (socketEventGuard(socket, 'webrtc-answer', LIM.sig)) io.to(to).emit('webrtc-answer', { from: socket.id, sdp }); });
+  socket.on('webrtc-ice',    ({ to, candidate }) => { if (socketEventGuard(socket, 'webrtc-ice',    LIM.sig)) io.to(to).emit('webrtc-ice',    { from: socket.id, candidate }); });
 
-    io.to(roomId).emit("room-status", {
-      room: roomId,
-      users,
-      joined: socket.id,
-      deviceName,
+  socket.on('file-offer', ({ id, name, size, type }) => {
+    if (!socketEventGuard(socket, 'file-offer', LIM.file) || !currentRoom) return;
+    socket.to(currentRoom).emit('file-offer', {
+      from: socket.id, fromName: deviceName, fromShort: socket.id.slice(0, 5),
+      meta: {
+        id:   String(id   || `${name}|${size}`).slice(0, 200),
+        name: String(name || '').replace(/[<>'"]/g, '').slice(0, 500),
+        size: Number(size) || 0,
+        type: String(type || 'application/octet-stream').slice(0, 100),
+      },
     });
-
-    const peers = [...rooms.get(roomId)]
-      .filter(p => p.socketId !== socket.id)
-      .map(p => ({ socketId: p.socketId, deviceName: p.deviceName }));
-    socket.emit("room-peers", peers);
-
-    const fullList = [...rooms.get(roomId)]
-      .map(p => ({ socketId: p.socketId, deviceName: p.deviceName }));
-    io.to(roomId).emit("room-member-list", { room: roomId, members: fullList });
   });
 
-  // ── FILE OFFER ────────────────────────────────────────────
-  socket.on("file-offer", ({ id, name, size, type }) => {
+  socket.on('file-answer',    ({ to, accepted })    => { if (socketEventGuard(socket, 'file-answer', LIM.file)) io.to(to).emit('file-answer', { from: socket.id, accepted: !!accepted }); });
+  socket.on('file-cancel', (data) => {
     if (!currentRoom) return;
-    touchRoom(currentRoom);  // ← [REAPER] file activity = room is live
-
-
-    const safeName = String(name || "").slice(0, 512) || "file";
-    const safeSize = Math.max(0, Number(size) || 0);
-    const safeType = String(type || "application/octet-stream").slice(0, 256);
-
-    socket.to(currentRoom).emit("file-offer", {
-      from:     socket.id,
-      fromName: deviceName,
-      meta: { id, name: safeName, size: safeSize, type: safeType },
-    });
-    console.log(`[Room ${currentRoom}] ${deviceName} offered: ${safeName} (${fmtBytes(safeSize)})`);
+    // SECURITY FIX: Never spread untrusted client `data` into the emitted event.
+    // A malicious client could send { by: "<script>..." } and override deviceName.
+    // Only emit server-controlled fields.
+    const reason = (typeof data?.reason === 'string') ? data.reason.slice(0, 100) : undefined;
+    socket.to(currentRoom).emit('file-cancel', { by: deviceName, ...(reason ? { reason } : {}) });
   });
+  socket.on('file-offer-seen',({ to } = {})         => { if (to) io.to(to).emit('file-offer-seen', { from: socket.id }); });
+  socket.on('room-queue',     (data)                => { if (currentRoom) socket.to(currentRoom).emit('room-queue', data); });
+  socket.on('peer-closing',   ({ room, name } = {}) => { const r = room || currentRoom; if (r) socket.to(r).emit('peer-left', { socketId: socket.id, deviceName: name || deviceName }); });
 
-  socket.on("file-answer", ({ to, accepted }) => {
-    io.to(to).emit("file-answer", { from: socket.id, accepted });
-    console.log(`[Room ${currentRoom}] ${deviceName} ${accepted ? "✅ accepted" : "❌ rejected"} file from ${to.slice(0,6)}`);
+  socket.on('chat-msg', ({ text, msgId } = {}) => {
+    if (!socketEventGuard(socket, 'chat-msg', LIM.chat) || !currentRoom) return;
+    if (typeof text !== 'string' || text.length > 1000) return;
+    const safe = text.replace(/</g, '&lt;').replace(/>/g, '&gt;').slice(0, 1000);
+    io.to(currentRoom).emit('chat-msg', { from: socket.id, name: deviceName, text: safe, msgId });
   });
+  socket.on('chat-ack',       ({ to, msgId, status } = {}) => { if (to) io.to(to).emit('chat-ack', { msgId, status }); });
+  socket.on('chat-delivered', () => { if (currentRoom) socket.to(currentRoom).emit('chat-delivered', { from: socket.id }); });
+  socket.on('typing',         ({ roomId: rId, user } = {}) => { const r = rId || currentRoom; if (r) socket.to(r).emit('typing', { user: user || deviceName }); });
+  socket.on('zip-compressing', ({ room, fileCount, totalSize, senderName } = {}) => { const r = room || currentRoom; if (r) socket.to(r).emit('zip-compressing', { fileCount, totalSize, senderName }); });
+  socket.on('zip-ready',       ({ room } = {})                                    => { const r = room || currentRoom; if (r) socket.to(r).emit('zip-ready', {}); });
+  socket.on('reconnect-request', ({ to } = {}) => { if (to) io.to(to).emit('reconnect-request', { from: socket.id }); });
+  socket.on('stop-typing',    ({ roomId: rId } = {})       => { const r = rId || currentRoom; if (r) socket.to(r).emit('stop-typing'); });
+  socket.on('keepalive', () => {});
 
-  // Client fires this on beforeunload so peers get instant notification
-  // rather than waiting for the 90s grace-period expiry
-  socket.on("peer-closing", ({ room, name }) => {
-    if (room && room === currentRoom) {
-      socket.to(room).emit("peer-left", { socketId: socket.id, deviceName: name || deviceName });
-    }
+  socket.on('disconnect', async (reason) => {
+    console.log(`[WS] ${deviceName} (${socket.id.slice(0,6)}) disconnected — ${reason}`);
+    socketMeta.delete(socket.id);
+    if (currentRoom) leaveRoom(currentRoom);
+    try { await redis.client.del(`socket:${socket.id}`); } catch {}
+    if (auditLogger) auditLogger.log('disconnect', { roomId: currentRoom, reason, deviceName }, ip).catch(() => {});
   });
-
-  socket.on("file-cancel", (data) => {
-    if (currentRoom) socket.to(currentRoom).emit("file-cancel", data);
-  });
-
-  socket.on("room-queue", (data) => {
-    if (currentRoom) socket.to(currentRoom).emit("room-queue", data);
-  });
-  // ── WebRTC SIGNALING ────────────────────────────────────
-  socket.on("webrtc-offer", ({ to, sdp }) => {
-    touchRoom(currentRoom);  // ← [REAPER] WebRTC negotiation = room is live
-    io.to(to).emit("webrtc-offer", { from: socket.id, sdp });
-  });
-  socket.on("webrtc-answer", ({ to, sdp }) => {
-    io.to(to).emit("webrtc-answer", { from: socket.id, sdp });
-  });
-  socket.on("webrtc-ice", ({ to, candidate }) => {
-    io.to(to).emit("webrtc-ice", { from: socket.id, candidate });
-  });
-
-  // ── CHAT ──────────────────────────────────────────────────
-  socket.on("chat-msg", ({ text, msgId }) => {
-    if (!currentRoom || !text) return;
-    io.to(currentRoom).emit("chat-msg", { from: socket.id, name: deviceName, text, msgId });
-  });
-
-  // Delivery/read receipt — route back to original sender only
-  socket.on("chat-ack", ({ to, msgId, status }) => {
-    if (!to || !msgId) return;
-    io.to(to).emit("chat-ack", { msgId, status });
-  });
-
-  // ── TYPING INDICATORS ─────────────────────────────────────
-  socket.on("typing", ({ roomId, user }) => {
-    const room = roomId || currentRoom;
-    if (!room) return;
-    socket.to(room).emit("typing", { user: user || deviceName });
-  });
-
-  socket.on("stop-typing", ({ roomId } = {}) => {
-    const room = roomId || currentRoom;
-    if (!room) return;
-    socket.to(room).emit("stop-typing");
-  });
-
-  // ── KEEPALIVE ─────────────────────────────────────────────
-  socket.on("keepalive", () => {
-    console.log(`[Keepalive] ${deviceName} (${socket.id.slice(0,6)})`);
-    if (gracePending.has(socket.id)) {
-      const entry = gracePending.get(socket.id);
-      clearTimeout(entry.timer);
-      gracePending.delete(socket.id);
-      console.log(`[Keepalive] Grace timer cancelled for ${deviceName}`);
-    }
-  });
-
-  // ── DISCONNECT ────────────────────────────────────────────
-  socket.on("disconnect", (reason) => {
-    console.log(`[-] Disconnected: ${socket.id} (${deviceName}) — reason: ${reason}`);
-
-    if (!currentRoom) return;
-
-    const savedRoom = currentRoom;
-    const savedName = deviceName;
-    currentRoom = null;
-
-    const GRACE_MS = 90_000;
-    const timer = setTimeout(() => {
-      gracePending.delete(socket.id);
-      _leaveRoom(socket, savedRoom, savedName);
-      console.log(`[Room ${savedRoom}] ${savedName} — grace expired, evicted`);
-    }, GRACE_MS);
-
-    gracePending.set(socket.id, { roomId: savedRoom, deviceName: savedName, timer });
-    console.log(`[Room ${savedRoom}] ${savedName} — grace period started (${GRACE_MS/1000}s)`);
-  });
-
-  function leaveRoom(sock, roomId) {
-    _leaveRoom(sock, roomId, deviceName);
-    currentRoom = null;
-  }
-
-  function _leaveRoom(sock, roomId, name) {
-    sock.leave(roomId);
-    const room = rooms.get(roomId);
-    if (room) {
-      room.forEach(p => { if (p.socketId === sock.id) room.delete(p); });
-      if (room.size === 0) {
-        rooms.delete(roomId);
-      } else {
-        io.to(roomId).emit("room-status", { room: roomId, users: room.size, left: sock.id, deviceName: name });
-        const fullList = [...room].map(p => ({ socketId: p.socketId, deviceName: p.deviceName }));
-        io.to(roomId).emit("room-member-list", { room: roomId, members: fullList });
-        io.to(roomId).emit("peer-left", { socketId: sock.id, deviceName: name });
-      }
-    }
-  }
 });
 
-// ── Print all LAN IPs on startup ──────────────────────────────
-function getLanIps() {
-  const nets = os.networkInterfaces();
-  const ips  = [];
-  for (const iface of Object.values(nets)) {
+// ── Error handler ─────────────────────────────────────────────────────────────
+app.use(errorHandler);
+
+// ── LAN IP helper (used by manifest + startup log) ────────────────────────────
+function getLanIPs() {
+  const ips = [];
+  for (const iface of Object.values(os.networkInterfaces())) {
     for (const addr of iface) {
-      if (addr.family === "IPv4" && !addr.internal) ips.push(addr.address);
+      if (addr.family === 'IPv4' && !addr.internal) ips.push(addr.address);
     }
   }
   return ips;
 }
 
-function fmtBytes(b) {
-  const u = ["B","KB","MB","GB"]; let i=0,n=b;
-  while (n>=1024&&i<u.length-1){n/=1024;i++;}
-  return `${n.toFixed(i?2:0)} ${u[i]}`;
-}
+// ── Start ─────────────────────────────────────────────────────────────────────
+server.listen(config.port, '0.0.0.0', () => {
+  const lanIPs = getLanIPs();
+  const primaryLanIp = lanIPs[0] || null;
 
-// ── START ─────────────────────────────────────────────────────
-server.listen(PORT, "0.0.0.0", () => {
-  console.log("\n════════════════════════════════════════");
-  console.log(`  🚀 Server running on port ${PORT}`);
-  console.log("────────────────────────────────────────");
-  console.log(`  Local:   http://localhost:${PORT}`);
-  getLanIps().forEach(ip => {
-    console.log(`  Network: http://${ip}:${PORT}   ← share this`);
-  });
-  console.log("════════════════════════════════════════\n");
+  console.log('\n════════════════════════════════════════════════');
+  console.log(`  ✅ Tranzo  |  port ${config.port}  |  ${config.node_env}`);
+  console.log('');
+  console.log(`  💻 Laptop :  http://localhost:${config.port}`);
+  if (lanIPs.length) {
+    lanIPs.forEach(ip => console.log(`  📱 Android:  http://${ip}:${config.port}`));
+    console.log('');
+    console.log(`  🔍 Test first: http://${lanIPs[0]}:${config.port}/ping`);
+  } else {
+    console.log('  ⚠️  No LAN IP found — connect to WiFi');
+  }
+  console.log('');
+  console.log(`  CORS / CSP / Guards: ${IS_DEV ? 'OFF (dev mode — all devices allowed)' : 'ON (production)'}`);
+
+  if (IS_DEV) {
+    console.log('');
+    console.log('  ── PWA LOCAL TESTING ──────────────────────────────');
+    console.log('  PWA on DESKTOP Chrome (localhost):');
+    console.log('    → Works automatically. Look for ⊕ icon in address bar.');
+    console.log('    → If missing: chrome://flags → "Bypass App Banner Engagement"');
+    console.log(`    → Or: DevTools → Application → Manifest → "Add to homescreen"`);
+    console.log('');
+    if (primaryLanIp) {
+      console.log('  PWA on ANDROID (LAN IP — HTTP, not HTTPS):');
+      console.log(`    1. Open Chrome on Android → http://${primaryLanIp}:${config.port}`);
+      console.log('    2. Chrome DevTools remote debugging (USB):');
+      console.log('       chrome://inspect → Port forwarding → localhost:3000 → 3000');
+      console.log(`       Then visit http://localhost:${config.port} on Android`);
+      console.log('    3. Or: chrome://flags/#unsafely-treat-insecure-origin-as-secure');
+      console.log(`       Add: http://${primaryLanIp}:${config.port}`);
+    }
+    console.log('  ──────────────────────────────────────────────────');
+  }
+  console.log('════════════════════════════════════════════════\n');
 });
+
+module.exports = { app, server, io };

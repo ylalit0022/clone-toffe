@@ -883,6 +883,26 @@
   </style>
 
 
+  <!-- ── PWA — Progressive Web App ── -->
+  <link rel="manifest" href="/manifest.json" crossorigin="use-credentials" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/img/favicon-32.png" />
+
+  <!-- iOS Safari PWA meta tags -->
+  <!-- apple-touch-icon: used for home screen icon on iOS -->
+  <link rel="apple-touch-icon" sizes="192x192" href="/img/icon-192.png" />
+  <link rel="apple-touch-icon" sizes="512x512" href="/img/icon-512.png" />
+  <!-- apple-mobile-web-app-capable: enables standalone mode on iOS (Add to Home Screen) -->
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <!-- black-translucent gives full-screen with colored status bar on iOS -->
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Tranzo" />
+
+  <!-- Android Chrome / generic -->
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="theme-color" content="#059669" media="(prefers-color-scheme: light)" />
+  <meta name="theme-color" content="#059669" media="(prefers-color-scheme: dark)" />
+  <meta name="application-name" content="Tranzo" />
+
   <!-- Dynamic site config — loads SITE_URL + TURN hosts from server env -->
   <!-- This avoids hardcoding the domain in any client-side JS file -->
   <script>
@@ -961,6 +981,19 @@
             {% endif %}
 
           </ul>
+
+          {# ── PWA Install Button — hidden until beforeinstallprompt fires ── #}
+          <button id="pwaInstallBtn"
+            style="display:none; align-items:center; gap:6px; margin-left:8px;
+                   background:var(--em); color:#fff; border:none; border-radius:8px;
+                   padding:7px 14px; font-size:13px; font-weight:600; cursor:pointer;
+                   font-family:inherit; transition:background .2s;"
+            onmouseover="this.style.background='var(--emDark)'"
+            onmouseout="this.style.background='var(--em)'">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Install App
+          </button>
+
         </div>
 
       </div>
@@ -1084,6 +1117,116 @@
     }
   }
   </script>
+
+  {# ── PWA: Service Worker Registration + Install Prompt ── #}
+  <script>
+  // ── Register Service Worker ──────────────────────────────────
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', function() {
+      navigator.serviceWorker.register('/sw.js', { scope: '/' })
+        .then(function(reg) {
+          console.log('[PWA] SW registered, scope:', reg.scope);
+          // Trigger update check on page load (pick up new sw.js)
+          reg.update();
+        })
+        .catch(function(err) {
+          console.warn('[PWA] SW registration failed:', err);
+        });
+    });
+  }
+
+  // ── Install Prompt: Android Chrome / Desktop ─────────────────
+  // iOS Safari does NOT fire beforeinstallprompt — handled separately below.
+  let _deferredInstallPrompt = null;
+
+  window.addEventListener('beforeinstallprompt', function(e) {
+    e.preventDefault();
+    _deferredInstallPrompt = e;
+
+    // Show our custom install button
+    var btn = document.getElementById('pwaInstallBtn');
+    if (btn) {
+      btn.style.display = 'flex';
+      // Guard: add listener only once
+      if (!btn._pwaListenerAdded) {
+        btn._pwaListenerAdded = true;
+        btn.addEventListener('click', function() {
+          btn.style.display = 'none';
+          if (!_deferredInstallPrompt) return;
+          _deferredInstallPrompt.prompt();
+          _deferredInstallPrompt.userChoice.then(function(result) {
+            console.log('[PWA] Install choice:', result.outcome);
+            _deferredInstallPrompt = null;
+          });
+        });
+      }
+    }
+  });
+
+  // Hide install button if already installed (Android/Desktop)
+  window.addEventListener('appinstalled', function() {
+    var btn = document.getElementById('pwaInstallBtn');
+    if (btn) btn.style.display = 'none';
+    _deferredInstallPrompt = null;
+    console.log('[PWA] App installed successfully!');
+  });
+
+  // ── iOS Safari: "Add to Home Screen" guidance ─────────────────
+  // iOS never fires beforeinstallprompt. Detect iOS standalone context:
+  // - navigator.standalone === false → not yet installed → show tip
+  // - navigator.standalone === true  → already running as PWA → skip
+  (function() {
+    var isIos = /iphone|ipad|ipod/i.test(navigator.userAgent);
+    var isInStandaloneMode = (window.navigator.standalone === true);
+    var dismissed = false;
+    try { dismissed = !!sessionStorage.getItem('pwa-ios-dismissed'); } catch {}
+
+    if (isIos && !isInStandaloneMode && !dismissed) {
+      // Show after a short delay so it doesn't flash on load
+      setTimeout(function() {
+        var tip = document.getElementById('pwaIosTip');
+        if (tip) tip.style.display = 'flex';
+      }, 4000);
+    }
+
+    // Dismiss handler (set on DOMContentLoaded so element exists)
+    document.addEventListener('DOMContentLoaded', function() {
+      var closeBtn = document.getElementById('pwaIosTipClose');
+      if (closeBtn) {
+        closeBtn.addEventListener('click', function() {
+          var tip = document.getElementById('pwaIosTip');
+          if (tip) tip.style.display = 'none';
+          try { sessionStorage.setItem('pwa-ios-dismissed', '1'); } catch {}
+        });
+      }
+    });
+  })();
+  </script>
+
+  <!-- ── iOS PWA Install Tip ────────────────────────────────────── -->
+  <!-- Shown only on iOS Safari when app is not yet installed as PWA -->
+  <div id="pwaIosTip" style="display:none;position:fixed;bottom:0;left:0;right:0;z-index:9999;
+    background:#1a1a2e;color:#fff;padding:14px 16px 20px;
+    flex-direction:column;align-items:center;gap:8px;
+    border-top:2px solid #059669;font-family:'Plus Jakarta Sans',sans-serif;
+    box-shadow:0 -4px 24px rgba(0,0,0,.3);">
+    <div style="display:flex;align-items:center;justify-content:space-between;width:100%;max-width:420px">
+      <div style="display:flex;align-items:center;gap:10px">
+        <img src="/img/icon-192.png" width="36" height="36" style="border-radius:8px" alt="Tranzo" />
+        <div>
+          <div style="font-weight:700;font-size:14px">Install Tranzo</div>
+          <div style="font-size:12px;opacity:.8">Add to your Home Screen for the best experience</div>
+        </div>
+      </div>
+      <button id="pwaIosTipClose" style="background:none;border:none;color:#fff;font-size:20px;
+        cursor:pointer;padding:4px 8px;opacity:.7;line-height:1" aria-label="Dismiss">✕</button>
+    </div>
+    <div style="font-size:13px;opacity:.85;text-align:center;max-width:340px">
+      Tap <strong style="color:#059669">Share</strong>
+      <span style="display:inline-block;width:18px;height:18px;background:url(data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23059669'%3E%3Cpath d='M12 2l-3.5 3.5 1.4 1.4L11 5.8V16h2V5.8l1.1 1.1 1.4-1.4L12 2zm-6 9v9h12v-9h-2v7H8v-7H6z'/%3E%3C/svg%3E) center/contain no-repeat;vertical-align:middle"></span>
+      then <strong style="color:#059669">Add to Home Screen</strong>
+    </div>
+  </div>
 
 </body>
 </html>

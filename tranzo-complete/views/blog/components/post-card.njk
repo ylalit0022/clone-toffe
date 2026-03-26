@@ -1,0 +1,58 @@
+{#
+  blog/components/post-card.njk  —  Reusable post card
+  Variable: post
+#}
+<article class="post-card" itemscope itemtype="https://schema.org/BlogPosting">
+  <a href="/blog/{{ post.slug }}" class="post-card-img-link" tabindex="-1" aria-hidden="true">
+    {% if post.coverImage %}
+      <div class="post-card-img-wrap">
+        <img src="{{ post.coverImage.url }}" alt="{{ post.coverImage.alt }}"
+             width="400" height="220" loading="lazy" class="post-card-img" itemprop="image" />
+      </div>
+    {% else %}
+      <div class="post-card-img-wrap post-card-no-img" aria-hidden="true">
+        <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity=".25">
+          <rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9l4-4 4 4 4-4 4 4"/><circle cx="8.5" cy="14.5" r="1.5"/>
+        </svg>
+      </div>
+    {% endif %}
+  </a>
+
+  <div class="post-card-body">
+    {% if post.category %}
+      <a href="/blog/category/{{ post.category | lower | replace(' ', '-') }}" class="post-card-cat">
+        {{ post.category }}
+      </a>
+    {% endif %}
+
+    <h2 class="post-card-title" itemprop="headline">
+      <a href="/blog/{{ post.slug }}" itemprop="url">{{ post.title }}</a>
+    </h2>
+
+    {% if post.description %}
+      <p class="post-card-desc" itemprop="description">
+        {{ post.description | truncate(115) }}
+      </p>
+    {% endif %}
+
+    <footer class="post-card-footer">
+      {% if post.author %}
+        <a href="/blog/author/{{ post.author.slug or post.author.name | lower | replace(' ', '-') }}"
+           class="post-card-author" itemprop="author" itemscope itemtype="https://schema.org/Person">
+          {% if post.author.avatar %}
+            <img src="{{ post.author.avatar }}" alt="{{ post.author.name }}" class="post-card-avatar" width="22" height="22" loading="lazy" />
+          {% else %}
+            <span class="post-card-avatar-init" aria-hidden="true">{{ post.author.name[0] | upper }}</span>
+          {% endif %}
+          <span itemprop="name">{{ post.author.name }}</span>
+        </a>
+        <span class="post-card-sep" aria-hidden="true">·</span>
+      {% endif %}
+      {% if post.publishedDateFormatted %}
+        <time datetime="{{ post.publishedDate }}" itemprop="datePublished" class="post-card-date">{{ post.publishedDateFormatted }}</time>
+        <span class="post-card-sep" aria-hidden="true">·</span>
+      {% endif %}
+      <span class="post-card-read">{{ post.readingTime }}m read</span>
+    </footer>
+  </div>
+</article>

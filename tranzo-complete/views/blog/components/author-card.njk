@@ -1,0 +1,62 @@
+{#
+  blog/components/author-card.njk  —  E-E-A-T author section
+  Variable: author  { name, slug, role, bio, avatar, twitter, website }
+#}
+{% if author %}
+<aside class="author-card" aria-label="About the author"
+       itemprop="author" itemscope itemtype="https://schema.org/Person">
+
+  {% if author.avatar %}
+    <img src="{{ author.avatar }}" alt="{{ author.name }}" class="author-card-avatar"
+         width="80" height="80" loading="lazy" itemprop="image" />
+  {% else %}
+    <div class="author-card-avatar author-card-avatar--init" aria-hidden="true">
+      {{ author.name[0] | upper }}
+    </div>
+  {% endif %}
+
+  <div class="author-card-body">
+    <div class="author-card-top">
+      <div>
+        <div class="author-card-name" itemprop="name">
+          {% if author.slug %}
+            <a href="/blog/author/{{ author.slug }}">{{ author.name }}</a>
+          {% else %}
+            {{ author.name }}
+          {% endif %}
+        </div>
+        {% if author.role %}
+          <div class="author-card-role" itemprop="jobTitle">{{ author.role }}</div>
+        {% endif %}
+      </div>
+      <div class="author-card-links">
+        {% if author.twitter %}
+          <a href="{{ author.twitter }}" rel="noopener noreferrer" target="_blank"
+             class="author-card-social" aria-label="{{ author.name }} on Twitter" itemprop="sameAs">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-4.714-6.231-5.401 6.231H2.736l7.738-8.85L1.254 2.25H8.08l4.253 5.622L18.244 2.25zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
+            </svg>
+          </a>
+        {% endif %}
+        {% if author.website %}
+          <a href="{{ author.website }}" rel="noopener noreferrer" target="_blank"
+             class="author-card-social" aria-label="{{ author.name }} website" itemprop="url">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/>
+              <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+            </svg>
+          </a>
+        {% endif %}
+      </div>
+    </div>
+    {% if author.bio %}
+      <p class="author-card-bio" itemprop="description">{{ author.bio }}</p>
+    {% endif %}
+    {% if author.slug %}
+      <a href="/blog/author/{{ author.slug }}" class="author-card-more">
+        View all articles by {{ author.name }} →
+      </a>
+    {% endif %}
+  </div>
+</aside>
+{% endif %}

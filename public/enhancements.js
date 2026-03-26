@@ -350,32 +350,84 @@
   // ─────────────────────────────────────────────────────────────────────────────
   //  1 ── ICE / DC STATE WATCHERS (Network Alerts)
   // ─────────────────────────────────────────────────────────────────────────────
-  var _iceState  = "";
-  var _dcWasOpen = false;
+  var _iceState          = "";
+  var _dcWasOpen         = false;
+  var _disconnectedTimer = null;   // debounce for transient ICE "disconnected"
+  var _dcCloseTimer      = null;   // debounce for DC close → suppress if DC re-opens quickly
 
   setInterval(function() {
-    // ICE state
+    // ── ICE state ─────────────────────────────────────────────────────────────
     var pc = _getPc();
     if (pc) {
       var s = pc.iceConnectionState;
       if (s !== _iceState) {
         _iceState = s;
-        if (s === "checking")     toast("Connecting to peer…", "info", 5000);
-        if (s === "disconnected") toast("Connection unstable — attempting recovery…", "warn", 6000);
-        if (s === "failed")       toast("Connection lost — attempting to reconnect…", "error", 7000);
+
+        if (s === "checking") {
+          // Cancel any pending "disconnected" toast — we're trying a new candidate pair
+          if (_disconnectedTimer) { clearTimeout(_disconnectedTimer); _disconnectedTimer = null; }
+          toast("Connecting to peer…", "info", 5000);
+        }
+
+        if (s === "connected" || s === "completed") {
+          // Healthy — cancel any pending "disconnected" debounce
+          if (_disconnectedTimer) { clearTimeout(_disconnectedTimer); _disconnectedTimer = null; }
+        }
+
+        if (s === "disconnected") {
+          // FIX: "disconnected" is almost always transient on LAN — ICE self-heals
+          // within ~500ms when switching candidate pairs or after a brief Wi-Fi
+          // hiccup. Showing the toast immediately is a false alarm in nearly all
+          // LAN scenarios. Debounce 2.5s: only fire if STILL disconnected after.
+          if (_disconnectedTimer) clearTimeout(_disconnectedTimer);
+          _disconnectedTimer = setTimeout(function() {
+            _disconnectedTimer = null;
+            var cur = _getPc();
+            if (cur && cur.iceConnectionState === "disconnected") {
+              toast("Connection unstable — attempting recovery…", "warn", 6000);
+            }
+          }, 2500);
+        }
+
+        if (s === "failed") {
+          // Cancel the "disconnected" debounce — "failed" is a stronger signal
+          if (_disconnectedTimer) { clearTimeout(_disconnectedTimer); _disconnectedTimer = null; }
+          toast("Connection lost — attempting to reconnect…", "error", 7000);
+        }
       }
     }
 
-    // DC open/close
+    // ── DC open/close ──────────────────────────────────────────────────────────
     var dc = _getDc();
     var open = dc && dc.readyState === "open";
     if (open && !_dcWasOpen) {
       _dcWasOpen = true;
+      // Cancel pending "Connection closed" toast — DC re-opened (reconnect path)
+      if (_dcCloseTimer) { clearTimeout(_dcCloseTimer); _dcCloseTimer = null; }
       toast("Peer connected successfully ✅", "success", 4000);
       _hideSum();
     } else if (!open && _dcWasOpen) {
       _dcWasOpen = false;
-      toast("Connection closed", "warn", 5000);
+      // FIX: Debounce the "Connection closed" toast by 1.4s.
+      // When a file transfer completes, safeCloseAllPeers() closes the DC, which
+      // would fire this toast immediately — misleading after a successful transfer.
+      // Also: between consecutive file transfers the DC is briefly closed while
+      // the next ICE negotiation runs. A 1.4s window suppresses both false positives
+      // (the 700ms poll fires twice before the new DC opens).
+      if (_dcCloseTimer) clearTimeout(_dcCloseTimer);
+      _dcCloseTimer = setTimeout(function() {
+        _dcCloseTimer = null;
+        // Check again: if DC re-opened in the meantime, skip the toast
+        var cur = _getDc();
+        if (!cur || cur.readyState !== "open") {
+          // Also skip if we just completed a transfer cleanly
+          var statusEl = document.getElementById("fileStatus");
+          var statusTxt = statusEl ? statusEl.innerText : "";
+          if (!statusTxt.startsWith("✅")) {
+            toast("Connection closed", "warn", 5000);
+          }
+        }
+      }, 1400);
     }
   }, 700);
 
@@ -492,7 +544,8 @@
 
     sock.on("file-cancel", function(data) {
       var by = (data && data.by) ? data.by : "Peer";
-      toast("Transfer cancelled by " + by, "warn", 5000);
+      var safeBy = String(by || "Peer").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      toast("Transfer cancelled by " + safeBy, "warn", 5000);
       _stopRetry();
     });
 
@@ -576,7 +629,8 @@
       _stopRetry();
     },
     onTransferCancelled: function(by) {
-      toast(by === "self" ? "Transfer cancelled by you" : "Transfer cancelled by " + (by||"peer"), "warn", 5000);
+      var safeBy2 = String(by || "peer").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      toast(by === "self" ? "Transfer cancelled by you" : "Transfer cancelled by " + safeBy2, "warn", 5000);
       _stopRetry();
     },
   };

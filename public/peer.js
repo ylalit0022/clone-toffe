@@ -11,7 +11,7 @@
 //  Does NOT know about files, chunks, or transfer state.
 // ═══════════════════════════════════════════════════════════════
 
-import { buildIceServers } from "./ice.js";
+import { initIceConfig, getIceServers } from "./ice.js";
 
 const DEBUG = true;
 const plog = (...a) => DEBUG && console.log("[PEER]", ...a);
@@ -58,7 +58,7 @@ export function allOpenDcs() {
 
 // ── Create connection (offerer side) ──────────────────────────────────────────
 export async function createAndOffer(socketId, signalingSocket) {
-  const pc = _newPc(socketId);
+  const pc = await _newPc(socketId);
   const peer = peers.get(socketId);
 
   const dc = pc.createDataChannel("file", { ordered: true });
@@ -74,7 +74,7 @@ export async function createAndOffer(socketId, signalingSocket) {
 // ── Handle incoming offer (answerer side) ─────────────────────────────────────
 export async function handleOffer(socketId, sdp, signalingSocket) {
   _primaryId = socketId;
-  const pc = _newPc(socketId);
+  const pc = await _newPc(socketId);
 
   await pc.setRemoteDescription(sdp);
   const answer = await pc.createAnswer();
@@ -112,10 +112,20 @@ export function closeAll() {
 }
 
 // ── Internal: create RTCPeerConnection ────────────────────────────────────────
-function _newPc(socketId) {
+async function _newPc(socketId) {
+  // RACE-CONDITION FIX: guarantee TURN credentials are loaded before the PC
+  // is constructed. Without this await, getIceServers() returns STUN-only
+  // when the /api/ice-config fetch is still in-flight → ICE stays "new".
+  await initIceConfig();
+
   _generation++;
   const gen = _generation;
-  const pc = new RTCPeerConnection({ iceServers: buildIceServers(), bundlePolicy: "max-bundle", rtcpMuxPolicy: "require" });
+  const pc = new RTCPeerConnection({
+    iceServers:         getIceServers(),
+    iceTransportPolicy: "all",
+    bundlePolicy:       "max-bundle",
+    rtcpMuxPolicy:      "require",
+  });
   const peerObj = { pc, dc: null, gen, state: "connecting" };
   peers.set(socketId, peerObj);
   if (!_primaryId) _primaryId = socketId;

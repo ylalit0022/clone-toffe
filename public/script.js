@@ -1405,7 +1405,18 @@ socket.on("room-status", ({ room, users }) => {
                         || !!incomingFile
                         || !!outgoingFile
                         || !!pendingIncoming;
-    if (!transferActive) {
+
+    // ── FIX-DOT-MINIMIZE: Don't downgrade to "Waiting..." if the WebRTC
+    // DataChannel is still open. This happens when a tab is minimized and
+    // restored — the socket re-joins the room and the server briefly fires
+    // room-status with users=1 (race: our re-join is processed before the
+    // server has counted both peers). The DC being open proves the peer is
+    // still physically connected, so we hold the green dot and let the
+    // follow-up room-status (users=2) restore it correctly.
+    const dcStillOpen = getPrimaryDc() !== null ||
+      [...peerConnections.values()].some(p => p.dc?.readyState === "open");
+
+    if (!transferActive && !dcStillOpen) {
       setConnectedUI(false, "Waiting...", `Room: ${room} — Waiting...`);
     }
   }
@@ -1660,10 +1671,14 @@ socket.on("connect", () => {
   if (currentRoom) {
     socket.emit("join-room", { roomId: currentRoom, deviceName: getDeviceName() });
     dlog("[Reconnect] Re-joined room:", currentRoom);
-    // ── FIX-DOT-RECONNECT: Show "Reconnecting…" while waiting for room-status
-    // to confirm the peer count. The dot stays red until room-status fires with
-    // users >= 2 and calls setConnectedUI(true, …).
-    setConnectedUI(false, "Reconnecting…", currentRoom ? `Room: ${currentRoom}` : "");
+    // ── FIX-DOT-RECONNECT: Only show "Reconnecting…" if the WebRTC DC is also
+    // gone. If the DC is still open the peer is still reachable — keep the green
+    // dot and let the incoming room-status (users=2) confirm it naturally.
+    const dcStillOpen = getPrimaryDc() !== null ||
+      [...peerConnections.values()].some(p => p.dc?.readyState === "open");
+    if (!dcStillOpen) {
+      setConnectedUI(false, "Reconnecting…", `Room: ${currentRoom}`);
+    }
   }
 });
 
@@ -1684,21 +1699,23 @@ document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") {
     // Page came back into focus (user returned from gallery / file picker)
     dlog("[Visibility] Tab visible again");
+
+    // ── FIX-DOT-MINIMIZE: Check WebRTC DC state immediately on tab restore.
+    // If the DataChannel is still open the peer never left — restore the green
+    // dot right now without waiting for room-status (which has a race where
+    // users=1 arrives first and incorrectly shows "Waiting...").
+    const dcStillOpen = getPrimaryDc() !== null ||
+      [...peerConnections.values()].some(p => p.dc?.readyState === "open");
+    if (dcStillOpen && currentRoom) {
+      setConnectedUI(true, "Connected", `Room: ${currentRoom} — connected`);
+    }
+
     if (!socket.connected) {
       dlog("[Visibility] Socket disconnected — forcing reconnect");
-      // ── FIX-DOT-VISIBLE: Ensure dot is red while we wait for reconnect ──
-      if (currentRoom) {
+      if (currentRoom && !dcStillOpen) {
         setConnectedUI(false, "Reconnecting…", `Room: ${currentRoom} — reconnecting…`);
       }
       socket.connect();
-    } else if (currentRoom) {
-      // Socket still connected but we need to re-verify peer count.
-      // Re-emit join-room so the server sends a fresh room-status event,
-      // which will restore the green dot if the peer is still present.
-      // FIX-DUAL-OFFER: Skip if a WebRTC reconnect is already in progress.
-      if (!retryInProgress) {
-        socket.emit("join-room", { roomId: currentRoom, deviceName: getDeviceName() });
-      }
     }
     // If we have a room, re-emit join-room as a safety net.
     // FIX-DUAL-OFFER: Skip if a WebRTC reconnect is already in progress —
@@ -1706,15 +1723,6 @@ document.addEventListener("visibilitychange", () => {
     // a second offer race on top of the ongoing ICE negotiation.
     if (currentRoom && socket.connected && !retryInProgress) {
       socket.emit("join-room", { roomId: currentRoom, deviceName: getDeviceName() });
-    }
-  } else {
-    // ── FIX-DOT-HIDDEN: Page going hidden (minimize / switch tab) ─────────
-    // Proactively set dot to red so the indicator is correct if the user
-    // glances at the tab preview or another device mirrors the screen.
-    // The dot will be restored to green when room-status confirms users >= 2
-    // after the socket reconnects on the next visibilitychange → visible.
-    if (currentRoom) {
-      setConnectedUI(false, "Minimized…", `Room: ${currentRoom}`);
     }
   }
 });

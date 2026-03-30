@@ -1660,6 +1660,22 @@ socket.on("connect", () => {
   if (currentRoom) {
     socket.emit("join-room", { roomId: currentRoom, deviceName: getDeviceName() });
     dlog("[Reconnect] Re-joined room:", currentRoom);
+    // ── FIX-DOT-RECONNECT: Show "Reconnecting…" while waiting for room-status
+    // to confirm the peer count. The dot stays red until room-status fires with
+    // users >= 2 and calls setConnectedUI(true, …).
+    setConnectedUI(false, "Reconnecting…", currentRoom ? `Room: ${currentRoom}` : "");
+  }
+});
+
+// ── FIX-DOT-DISCONNECT: Turn dot red immediately when socket drops ────────────
+// Without this handler the dot stays green when the window is minimized/hidden
+// and the socket briefly disconnects, giving a false "connected" reading.
+socket.on("disconnect", (reason) => {
+  dlog("[Socket] Disconnected:", reason);
+  if (currentRoom) {
+    setConnectedUI(false, "Reconnecting…", `Room: ${currentRoom} — reconnecting…`);
+  } else {
+    setConnectedUI(false, "Not Connected");
   }
 });
 
@@ -1670,7 +1686,19 @@ document.addEventListener("visibilitychange", () => {
     dlog("[Visibility] Tab visible again");
     if (!socket.connected) {
       dlog("[Visibility] Socket disconnected — forcing reconnect");
+      // ── FIX-DOT-VISIBLE: Ensure dot is red while we wait for reconnect ──
+      if (currentRoom) {
+        setConnectedUI(false, "Reconnecting…", `Room: ${currentRoom} — reconnecting…`);
+      }
       socket.connect();
+    } else if (currentRoom) {
+      // Socket still connected but we need to re-verify peer count.
+      // Re-emit join-room so the server sends a fresh room-status event,
+      // which will restore the green dot if the peer is still present.
+      // FIX-DUAL-OFFER: Skip if a WebRTC reconnect is already in progress.
+      if (!retryInProgress) {
+        socket.emit("join-room", { roomId: currentRoom, deviceName: getDeviceName() });
+      }
     }
     // If we have a room, re-emit join-room as a safety net.
     // FIX-DUAL-OFFER: Skip if a WebRTC reconnect is already in progress —
@@ -1678,6 +1706,15 @@ document.addEventListener("visibilitychange", () => {
     // a second offer race on top of the ongoing ICE negotiation.
     if (currentRoom && socket.connected && !retryInProgress) {
       socket.emit("join-room", { roomId: currentRoom, deviceName: getDeviceName() });
+    }
+  } else {
+    // ── FIX-DOT-HIDDEN: Page going hidden (minimize / switch tab) ─────────
+    // Proactively set dot to red so the indicator is correct if the user
+    // glances at the tab preview or another device mirrors the screen.
+    // The dot will be restored to green when room-status confirms users >= 2
+    // after the socket reconnects on the next visibilitychange → visible.
+    if (currentRoom) {
+      setConnectedUI(false, "Minimized…", `Room: ${currentRoom}`);
     }
   }
 });

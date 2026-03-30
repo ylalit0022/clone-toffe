@@ -174,16 +174,21 @@ app.use((req, res, next) => { req.clientIp = extractIp(req); next(); });
 
 // ── Services init ─────────────────────────────────────────────────────────────
 let roomManager, iceManager, auditLogger, rateLimiter;
+
+// IceManager only needs env vars — initialize immediately, no DB/Redis dependency
+iceManager  = new IceManager(null);
+rateLimiter = new RateLimiter(redis.client);
+iceRouter.setDependencies(iceManager, rateLimiter);
+console.log('✓ IceManager ready (independent of DB)');
+
+// RoomManager + AuditLogger need MongoDB — initialize separately
 (async () => {
   try {
     const db = await connectDB();
     roomManager = new RoomManager(redis.client, db);
-    iceManager  = new IceManager(redis.client);
     auditLogger = new AuditLogger(db);
-    rateLimiter = new RateLimiter(redis.client);
     roomsRouter.setDependencies(roomManager, auditLogger, rateLimiter);
-    iceRouter.setDependencies(iceManager, rateLimiter);
-    console.log('✓ All services initialized');
+    console.log('✓ All DB services initialized');
   } catch (err) {
     console.error('❌ Service init:', err.message);
     if (!IS_DEV) process.exit(1);

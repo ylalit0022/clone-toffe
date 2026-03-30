@@ -100,7 +100,8 @@ const IS_MOBILE = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 // Credentials are fetched from /api/ice-config (server reads from env vars).
 // buildIceServers() returns STUN-only until the fetch completes — safe because
 // createPeerConnection always calls getIceServers() not buildIceServers().
-let _iceServers = null;
+let _iceServers       = null;
+let _iceConfigPromise = null;  // single shared promise — prevents race conditions
 
 const STUN_ONLY = [
   { urls: "stun:stun.l.google.com:19302" },
@@ -108,26 +109,32 @@ const STUN_ONLY = [
   { urls: "stun:stun.cloudflare.com:3478" },
 ];
 
-async function initIceConfig() {
-  if (_iceServers) return;
-  try {
-    const res = await fetch("/api/ice-config", { credentials: "same-origin" });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    if (Array.isArray(data.iceServers) && data.iceServers.length > 0) {
-      _iceServers = data.iceServers;
-      console.log("[ICE] Config loaded —", _iceServers.length, "servers");
-    } else throw new Error("Empty");
-  } catch(e) {
-    console.warn("[ICE] Fetch failed — STUN-only fallback:", e.message);
-    _iceServers = STUN_ONLY;
-  }
+// RACE-CONDITION FIX: returns a shared Promise — safe to call many times.
+// All callers await the same fetch; only one HTTP request is ever issued.
+function initIceConfig() {
+  if (_iceConfigPromise) return _iceConfigPromise;
+  _iceConfigPromise = (async () => {
+    if (_iceServers) return;
+    try {
+      const res = await fetch("/api/ice-config", { credentials: "same-origin" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (Array.isArray(data.iceServers) && data.iceServers.length > 0) {
+        _iceServers = data.iceServers;
+        console.log("[ICE] Config loaded —", _iceServers.length, "servers");
+      } else throw new Error("Empty iceServers array");
+    } catch(e) {
+      console.warn("[ICE] Fetch failed — STUN-only fallback:", e.message);
+      _iceServers = STUN_ONLY;
+    }
+  })();
+  return _iceConfigPromise;
 }
 function getIceServers() { return _iceServers || STUN_ONLY; }
 // Legacy alias kept for any module that calls buildIceServers()
 function buildIceServers() { return getIceServers(); }
 
-// Kick off fetch immediately (non-blocking)
+// Kick off fetch immediately (non-blocking pre-fetch)
 initIceConfig();
 
 // RTC_CONFIG is a getter so every new RTCPeerConnection picks up the
@@ -2054,7 +2061,9 @@ async function createPeerConnectionFor(socketId) {
 
   peerGeneration++;
   const gen = peerGeneration;
-  const pc = new RTCPeerConnection(RTC_CONFIG);
+  // RACE-CONDITION FIX: await ICE config before creating PC so TURN credentials are ready
+  await initIceConfig();
+  const pc = new RTCPeerConnection(getRtcConfig());
   const peerObj = { pc, dc: null, gen, pathType: "unknown", state: "connecting" };
   setPeer(socketId, peerObj);
   if (!_primaryPeerSocketId) _primaryPeerSocketId = socketId;
